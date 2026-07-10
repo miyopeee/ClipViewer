@@ -1,0 +1,15 @@
+# ビルド出力
+bin/
+obj/
+packages/
+.vs/
+*.user
+
+# 実行時に生成されるファイル
+ClipViewer.ini
+ClipViewer_history.txt
+
+# ローカル作業ファイル
+*.lnk
+build.rsp
+*.log
