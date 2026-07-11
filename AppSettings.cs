@@ -111,6 +111,8 @@ namespace ClipViewer
         public string SaveDirectory  { get; set; } =
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.MyPictures), "ClipViewer");
         public int    PageSkipCount  { get; set; } = 10;
+        /// <summary>ページ移動時にズーム倍率を保持する（v0.8.3）。パン位置は常にリセット。</summary>
+        public bool   KeepZoomOnNavigate { get; set; } = false;
         /// <summary>アーカイブ閲覧位置履歴（F52）の有効/無効。ToggleArchiveHistory キーでも切替可能。</summary>
         public bool   ArchiveHistoryEnabled { get; set; } = true;
         /// <summary>アーカイブ閲覧位置履歴の最大登録件数（古いものから自動削除）。</summary>

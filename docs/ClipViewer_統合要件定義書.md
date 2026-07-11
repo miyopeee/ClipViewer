@@ -1,10 +1,10 @@
-# ClipViewer v0.8.1 統合要件定義書
+# ClipViewer v0.8.3 統合要件定義書
 
 ## プロジェクト情報
 - **プロジェクト名**: ClipViewer
-- **バージョン**: v0.8.1
+- **バージョン**: v0.8.3
 - **作成日**: 2026/02/22
-- **最終更新**: 2026/07/11
+- **最終更新**: 2026/07/12
 - **ステータス**: 実装完了・試用中
 
 ---
@@ -655,10 +655,12 @@ LastWindowedHeight=800
 | 上下反転 | Alt+↓ | ScaleY=-1 トグル |
 
 - `RenderTransformOrigin="0.5,0.5"` で画面中央を軸に変換
-- `TransformGroup`（`ScaleTransform` + `RotateTransform`）を ImageTransformContainer に適用
+- `TransformGroup`（`RotateFitScale` + `FlipScale` + `RotateTransform`）を ImageTransformContainer に適用
 - ZoomContainer（ズーム・パン用）の内側に配置し、ズームとは独立して機能
-- ページ移動時（`ResetZoom()`）に回転・反転状態をリセット
+- **回転・反転状態はページ遷移後も保持される**（v0.8.3。アニメ・静止画共通。戻すのは手動）
+- **90/270°回転時は回転後の縦横でビューポートにフィット**（v0.8.3、単ページ表示のみ。見開きの全体回転は補正なし）
 - 回転・反転状態は終了時に保存しない（セッション内のみ有効）
+- ズーム倍率は ini `[Settings] KeepZoomOnNavigate=True` でページ遷移後も保持可能（既定 False。パン位置は常にリセット）
 
 ---
 

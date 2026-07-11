@@ -1,7 +1,7 @@
 <Window x:Class="ClipViewer.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="ClipViewer v0.8.2"
+        Title="ClipViewer v0.8.3"
         WindowStyle="None"
         WindowState="Maximized"
         Background="Black"
@@ -32,6 +32,8 @@
                   RenderTransformOrigin="0.5,0.5">
                 <Grid.RenderTransform>
                     <TransformGroup>
+                        <!-- 回転時FIT補正: 90/270°時に回転後の縦横でフィットさせる倍率（v0.8.3） -->
+                        <ScaleTransform  x:Name="RotateFitScale" ScaleX="1" ScaleY="1"/>
                         <ScaleTransform  x:Name="FlipScale"   ScaleX="1" ScaleY="1"/>
                         <RotateTransform x:Name="ImageRotate" Angle="0"/>
                     </TransformGroup>
@@ -43,6 +45,7 @@
                        RenderOptions.BitmapScalingMode="Fant"
                        HorizontalAlignment="Center"
                        VerticalAlignment="Center"
+                       SizeChanged="SingleImage_SizeChanged"
                        Visibility="Visible" />
 
                 <!-- 見開き表示: 2画像を密接横並び -->

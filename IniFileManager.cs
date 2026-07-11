@@ -148,6 +148,9 @@ namespace ClipViewer
                         case "PageSkipCount":
                             s.PageSkipCount = Math.Max(1, ParseInt(val, 10));
                             break;
+                        case "KeepZoomOnNavigate":
+                            s.KeepZoomOnNavigate = ParseBool(val, false);
+                            break;
                         case "ArchiveHistoryEnabled":
                             s.ArchiveHistoryEnabled = ParseBool(val, true);
                             break;
@@ -216,7 +219,7 @@ namespace ClipViewer
             var lines = new List<string>
             {
                 "; ========================================",
-                "; ClipViewer v0.8.2 設定ファイル",
+                "; ClipViewer v0.8.3 設定ファイル",
                 "; ========================================",
                 "; 対応フォーマット：.clip / .psd / .jpg / .jpeg / .png / .webp / .gif / .avif",
                 "; アーカイブ：.zip / .cbz（直接対応）/ .rar / .lzh / .7z（7-Zip 要インストール）",
@@ -334,6 +337,8 @@ namespace ClipViewer
                 $"SaveDirectory={s.SaveDirectory}",
                 "; PageSkipForward/Back でのスキップ数",
                 $"PageSkipCount={s.PageSkipCount}",
+                "; ページ移動時にズーム倍率を保持する（True/False。パン位置は常にリセット）",
+                $"KeepZoomOnNavigate={s.KeepZoomOnNavigate}",
                 "; アーカイブ閲覧位置履歴の有効/無効（ToggleArchiveHistory キーでも切替可）",
                 $"ArchiveHistoryEnabled={s.ArchiveHistoryEnabled}",
                 "; アーカイブ閲覧位置履歴の最大登録件数（古いものから自動削除）",

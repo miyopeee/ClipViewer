@@ -2209,16 +2209,19 @@ namespace ClipViewer
         // ズーム操作（F19）
         // =========================================================
 
+        /// <summary>
+        /// ページ遷移時の表示リセット（v0.8.3改定）。
+        /// - 回転・反転は**保持**する（連続して横倒し画像を見る用途。アニメ・静止画共通）
+        /// - ズーム倍率は ini の KeepZoomOnNavigate=True のとき保持、False（既定）でリセット
+        /// - パン位置は常にリセット（倍率保持時も次ページは中央から）
+        /// </summary>
         private void ResetZoom()
         {
-            _zoomFactor        = 1.0;
-            ZoomScale.ScaleX   = 1.0;
-            ZoomScale.ScaleY   = 1.0;
-            // 回転・反転もリセット
-            _rotationAngle     = 0;
-            _flipH             = false;
-            _flipV             = false;
-            ApplyImageTransform();
+            if (!_settings.KeepZoomOnNavigate)
+                _zoomFactor = 1.0;
+            ZoomScale.ScaleX   = _zoomFactor;
+            ZoomScale.ScaleY   = _zoomFactor;
+            ApplyImageTransform();  // 保持している回転・反転と回転FIT補正を再適用
             ZoomScale.CenterX  = 0;
             ZoomScale.CenterY  = 0;
             ZoomTranslate.X    = 0;
@@ -2234,6 +2237,31 @@ namespace ClipViewer
             ImageRotate.Angle = _rotationAngle;
             FlipScale.ScaleX  = _flipH ? -1.0 : 1.0;
             FlipScale.ScaleY  = _flipV ? -1.0 : 1.0;
+
+            // 回転時FIT補正（v0.8.3）: 90/270°回転時は縦横が入れ替わるため、
+            // 回転後の見た目サイズがビューポートに収まる（かつ最大化される）倍率を掛ける。
+            // 単ページ表示のみ対象（見開きの全体回転は従来どおり補正なし）。
+            double k = 1.0;
+            if ((_rotationAngle == 90 || _rotationAngle == 270)
+                && SingleImage.Visibility == Visibility.Visible
+                && SingleImage.ActualWidth  > 0 && SingleImage.ActualHeight > 0
+                && ActualWidth > 0 && ActualHeight > 0)
+            {
+                k = Math.Min(ActualWidth  / SingleImage.ActualHeight,
+                             ActualHeight / SingleImage.ActualWidth);
+            }
+            RotateFitScale.ScaleX = k;
+            RotateFitScale.ScaleY = k;
+        }
+
+        /// <summary>
+        /// 表示画像のレイアウトサイズ確定時に回転FIT補正を再計算する
+        /// （ページ遷移でソースが変わった直後は ActualWidth が旧値のため、ここで追従させる）。
+        /// </summary>
+        private void SingleImage_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            if (_rotationAngle == 90 || _rotationAngle == 270)
+                ApplyImageTransform();
         }
 
         private void RotateRight()
