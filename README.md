@@ -1,5 +1,7 @@
 # ClipViewer
 
+![Downloads](https://img.shields.io/github/downloads/miyopeee/ClipViewer/total) ![Release](https://img.shields.io/github/v/release/miyopeee/ClipViewer) ![License](https://img.shields.io/github/license/miyopeee/ClipViewer)
+
 **描きかけの .clip 原稿を、書き出さずにそのまま「読者視点」で読むための Windows 用ビューワー**
 
 ## コンセプト
