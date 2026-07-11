@@ -1,6 +1,6 @@
 # ClipViewer 仕様書
 
-**バージョン:** 0.8.1
+**バージョン:** 0.8.2
 **対象ファイル:** `bin\Release\ClipViewer.exe`
 **作成日:** 2026-03-01
 **最終更新:** 2026-07-11
@@ -314,7 +314,17 @@ LastSpreadAnchor(count):
 - 初期ファイル名は現在ファイル名を引き継ぐ（リネームも可能）
 - 見開き時はファイル名が若い方（`_currentIndex`）を対象
 
-### アニメーション再生（F33 / F34）
+### アニメーション再生（F33 / F34）— v0.8.2 でプログレッシブ化
+
+**背景デコード+プログレッシブ再生（v0.8.2）**: 旧実装は全フレームをUIスレッドで同期デコードしており、大きなアニメWebP/GIFでは再生開始まで数秒フリーズしていた。現行実装:
+
+- `EnsureAnimFrames()` が `Task.Run` で `DecodeGifFramesCore` / `DecodeWebPFramesCore` を起動（重複起動は `_animDecoding` でガード）
+- フレーム0確定時点で `RegisterAnimArrays()` がキャッシュ登録+`_gifAvailCache[idx]=1` → Dispatcher 経由 `OnAnimFramesReady()` が**即再生開始**
+- 以降のフレームは再生と並行して `CommitAnimFrame()` が配列を埋め、`_gifAvailCache` が「再生可能枚数」を更新
+- `GifRendering_Tick` は次フレームが未デコードなら現フレームを維持して待機（ストール）。200ms超のストール後は目標時刻を現在基準にリベースし、高速コマ飛びを防ぐ
+- コマ送り（F7/F8）はデコード済み範囲内でループ。AutoAdvance のページ遷移は全フレームデコード完了後のループ末尾でのみ発火
+- evict/リスト変更時は `CommitAnimFrame` の配列参照チェックが不一致となりデコードが自然に中断される
+- フレーム数1と判明したファイルは `_knownStatic` に登録して以後スキップ
 
 #### GIF アニメーション
 

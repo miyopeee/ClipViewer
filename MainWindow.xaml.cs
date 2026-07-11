@@ -57,6 +57,10 @@ namespace ClipViewer
         private GifPlayMode                               _gifPlayMode;
         private readonly Dictionary<int, BitmapSource[]> _gifFrameCache = new Dictionary<int, BitmapSource[]>();
         private readonly Dictionary<int, int[]>           _gifDelayCache = new Dictionary<int, int[]>();
+        // プログレッシブ再生（v0.8.2）: 配列は先頭から順に埋まり、ここが「再生可能なフレーム数」を示す。
+        // 再生側は _gifAvailCache 未満のインデックスのみ参照する（それ以降は未デコード=null の可能性）。
+        private readonly Dictionary<int, int>             _gifAvailCache = new Dictionary<int, int>();
+        private readonly HashSet<int>                     _animDecoding  = new HashSet<int>(); // 背景デコード実行中
         private EventHandler _gifRenderingHandler;      // CompositionTarget.Rendering ハンドラ
         private long         _gifNextFrameTick;         // 次フレームの Stopwatch 目標値（ticks）
         private Image        _gifTargetImage;
@@ -320,6 +324,7 @@ namespace ClipViewer
                         _srcSizeCache.Clear();
                         _gifFrameCache.Clear();
                         _gifDelayCache.Clear();
+                        _gifAvailCache.Clear();
                         _knownAnimated.Clear();
                         _knownStatic.Clear();
                     }
@@ -563,18 +568,19 @@ namespace ClipViewer
             SingleImage.Visibility = Visibility.Visible;
             SingleImage.Source     = LoadImage(_currentIndex); // まず最初のフレームを静止表示
 
-            // アニメーション処理: .gif / .webp で複数フレームなら再生開始
+            // アニメーション処理（v0.8.2 プログレッシブ化）:
+            // フレームは背景スレッドでデコードし、先頭フレームが用意でき次第
+            // OnAnimFramesReady 経由で再生を開始する（UIをブロックしない）。
             if (_currentIndex >= 0 && _currentIndex < _clipFiles.Count)
             {
                 string ext = Path.GetExtension(_clipFiles[_currentIndex]).ToLowerInvariant();
-                // フレーム未ロードなら即時デコード（冪等）
-                if (ext == ".gif" && !IsAnimatedGif(_currentIndex))
-                    LoadGifFrames(_currentIndex, _clipFiles[_currentIndex]);
-                else if (ext == ".webp" && !IsAnimatedGif(_currentIndex))
-                    LoadWebPFrames(_currentIndex, _clipFiles[_currentIndex]);
-
-                if ((ext == ".gif" || ext == ".webp") && IsAnimatedGif(_currentIndex))
-                    StartGifAnimation(_currentIndex, SingleImage);
+                if (ext == ".gif" || ext == ".webp")
+                {
+                    if (IsAnimatedGif(_currentIndex))
+                        StartGifAnimation(_currentIndex, SingleImage);  // デコード済み/進行中 → 即再生
+                    else
+                        EnsureAnimFrames(_currentIndex, _clipFiles[_currentIndex], ext);
+                }
             }
         }
 
@@ -1249,6 +1255,7 @@ namespace ClipViewer
                     _imageCache.Remove(key);
                     _gifFrameCache.Remove(key);  // GIF フレームキャッシュも同期 evict
                     _gifDelayCache.Remove(key);
+                    _gifAvailCache.Remove(key);  // 背景デコード中なら CommitAnimFrame の参照チェックで自然に中断される
                 }
                 // _wideCache はサイズが小さいため evict しない（ファイルリスト変更時のみクリア）
             }
@@ -1523,92 +1530,167 @@ namespace ClipViewer
         // アニメーション制御（GIF / WebP 共通）
         // =========================================================
 
+        // =========================================================
+        // アニメフレームの背景デコード（v0.8.2 プログレッシブ再生）
+        //
+        // 旧実装は全フレームをUIスレッドで同期デコードしており、大きい
+        // アニメWebP/GIFでは再生開始まで数秒フリーズしていた。
+        // 新実装: Task.Run でデコードし、フレーム0確定時点でキャッシュに登録
+        // → OnAnimFramesReady が即再生開始。以降のフレームは再生と並行して
+        // 配列を埋めていき、_gifAvailCache が「再生可能な枚数」を通知する。
+        // =========================================================
+
         /// <summary>
-        /// GIF の全フレームをキャンバス合成した上で _gifFrameCache / _gifDelayCache に格納する。
-        /// 既にロード済みの場合は即時リターン（冪等）。静止GIF（1フレーム）はスキップ。
-        /// GIF の差分フレーム・disposal メソッドを正しく処理してノイズを防ぐ。
-        /// DisplaySingle から UI スレッドで呼ぶこと。
+        /// アニメフレームの背景デコードを開始する（キャッシュ済み・デコード中・静止確定なら何もしない）。
         /// </summary>
-        private void LoadGifFrames(int index, string path)
+        private void EnsureAnimFrames(int index, string path, string ext)
         {
             lock (_cacheLock)
             {
                 if (_gifFrameCache.ContainsKey(index)) return;
+                if (_knownStatic.Contains(index))      return;
+                if (!_animDecoding.Add(index))         return; // 既にデコード中
             }
 
-            try
+            List<string> files = _clipFiles;
+            Task.Run(() =>
             {
-                GifBitmapDecoder decoder;
-                using (var fs = File.OpenRead(path))
+                try
                 {
-                    decoder = new GifBitmapDecoder(fs,
-                        BitmapCreateOptions.PreservePixelFormat,
-                        BitmapCacheOption.OnLoad);
+                    if (ext == ".gif") DecodeGifFramesCore(index, path, files);
+                    else               DecodeWebPFramesCore(index, path, files);
                 }
-
-                int count = decoder.Frames.Count;
-                if (count <= 1) return; // 静止GIF は通常キャッシュのみで十分
-
-                // GIF 全体サイズをグローバルメタデータから取得（フォールバック: フレーム0 サイズ）
-                int gifW = decoder.Frames[0].PixelWidth;
-                int gifH = decoder.Frames[0].PixelHeight;
-                var gm   = decoder.Metadata as BitmapMetadata;
-                if (gm != null)
+                catch { /* 破損ファイル・DLL欠落など → 静止表示のまま */ }
+                finally
                 {
-                    var qw = gm.GetQuery("/logscrdesc/Width");
-                    var qh = gm.GetQuery("/logscrdesc/Height");
-                    if (qw is ushort sw) gifW = sw;
-                    if (qh is ushort sh) gifH = sh;
+                    lock (_cacheLock) { _animDecoding.Remove(index); }
                 }
+            });
+        }
 
-                var composited = new BitmapSource[count];
-                var delays     = new int[count];
-                BitmapSource canvas  = null; // 現在のキャンバス合成状態
-                BitmapSource restore = null; // disposal=3 用の保存スナップショット
+        /// <summary>
+        /// 背景デコードで先頭フレームが用意できたときの再生開始（Dispatcher経由でUIスレッドから呼ばれる）。
+        /// ユーザーが既に別ページへ移動していた場合は何もしない。
+        /// </summary>
+        private void OnAnimFramesReady(int index)
+        {
+            if (index != _currentIndex) return;
+            if (SingleImage.Visibility != Visibility.Visible) return; // 見開き時は再描画フローに任せる
+            if (_gifCurrentIdx == index) return;                       // 既に再生中
+            StartGifAnimation(index, SingleImage);
+        }
 
-                for (int i = 0; i < count; i++)
-                {
-                    var frame = decoder.Frames[i];
-                    var meta  = frame.Metadata as BitmapMetadata;
-
-                    int left     = GetGifMetaUShort(meta, "/imgdesc/Left",      0);
-                    int top      = GetGifMetaUShort(meta, "/imgdesc/Top",       0);
-                    int disposal = GetGifMetaByte  (meta, "/grctlext/Disposal", 0);
-
-                    delays[i] = GetGifFrameDelay(frame);
-
-                    // disposal=3: 次フレームで戻すため現在キャンバスを保存
-                    if (disposal == 3) restore = canvas;
-
-                    // 前フレームのキャンバスに今フレームを重ねて合成
-                    var dv = new DrawingVisual();
-                    using (var dc = dv.RenderOpen())
-                    {
-                        if (canvas != null)
-                            dc.DrawImage(canvas, new Rect(0, 0, gifW, gifH));
-                        dc.DrawImage(frame,  new Rect(left, top, frame.PixelWidth, frame.PixelHeight));
-                    }
-                    var rtb = new RenderTargetBitmap(gifW, gifH, 96, 96, PixelFormats.Pbgra32);
-                    rtb.Render(dv);
-                    rtb.Freeze();
-                    composited[i] = rtb;
-
-                    // disposal メソッドに従い次フレームのベースを更新
-                    switch (disposal)
-                    {
-                        case 2:  canvas = null;    break; // 背景色（透明）に戻す
-                        case 3:  canvas = restore; break; // 1フレーム前の状態に戻す
-                        default: canvas = rtb;    break; // 合成結果をそのまま維持
-                    }
-                }
-
-                lock (_cacheLock)
-                {
-                    _gifFrameCache[index] = composited;
-                    _gifDelayCache[index] = delays;
-                }
+        /// <summary>
+        /// フレーム0確定時の初回登録。キャッシュに配列を登録して再生可能数=1とし、UIへ再生開始を通知する。
+        /// ファイルリストが変わっていたら登録せず false（デコード中断）。
+        /// </summary>
+        private bool RegisterAnimArrays(int index, List<string> files, BitmapSource[] frames, int[] delays)
+        {
+            lock (_cacheLock)
+            {
+                if (!ReferenceEquals(_clipFiles, files)) return false;
+                _gifFrameCache[index] = frames;
+                _gifDelayCache[index] = delays;
+                _gifAvailCache[index] = 1;
+                _knownAnimated.Add(index);
             }
-            catch { /* デコード失敗 → 静止表示にフォールバック */ }
+            Dispatcher.BeginInvoke(new Action(() => OnAnimFramesReady(index)));
+            return true;
+        }
+
+        /// <summary>
+        /// フレーム i（i≥1）確定時のコミット。破棄済み（evict等）なら false（デコード中断）。
+        /// frames[i]・delays[i] を書き込んでから呼ぶこと。
+        /// </summary>
+        private bool CommitAnimFrame(int index, BitmapSource[] frames, int i)
+        {
+            lock (_cacheLock)
+            {
+                if (!_gifFrameCache.TryGetValue(index, out BitmapSource[] cur)
+                    || !ReferenceEquals(cur, frames))
+                    return false;
+                _gifAvailCache[index] = i + 1;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// GIF の全フレームをキャンバス合成しながらプログレッシブに登録する（背景スレッド用）。
+        /// GIF の差分フレーム・disposal メソッドを正しく処理してノイズを防ぐ。
+        /// </summary>
+        private void DecodeGifFramesCore(int index, string path, List<string> files)
+        {
+            GifBitmapDecoder decoder;
+            using (var fs = File.OpenRead(path))
+            {
+                decoder = new GifBitmapDecoder(fs,
+                    BitmapCreateOptions.PreservePixelFormat,
+                    BitmapCacheOption.OnLoad);
+            }
+
+            int count = decoder.Frames.Count;
+            if (count <= 1)
+            {
+                lock (_cacheLock) { if (ReferenceEquals(_clipFiles, files)) _knownStatic.Add(index); }
+                return; // 静止GIF は通常キャッシュのみで十分
+            }
+
+            // GIF 全体サイズをグローバルメタデータから取得（フォールバック: フレーム0 サイズ）
+            int gifW = decoder.Frames[0].PixelWidth;
+            int gifH = decoder.Frames[0].PixelHeight;
+            var gm   = decoder.Metadata as BitmapMetadata;
+            if (gm != null)
+            {
+                var qw = gm.GetQuery("/logscrdesc/Width");
+                var qh = gm.GetQuery("/logscrdesc/Height");
+                if (qw is ushort sw) gifW = sw;
+                if (qh is ushort sh) gifH = sh;
+            }
+
+            var composited = new BitmapSource[count];
+            var delays     = new int[count];
+            BitmapSource canvas  = null; // 現在のキャンバス合成状態
+            BitmapSource restore = null; // disposal=3 用の保存スナップショット
+
+            for (int i = 0; i < count; i++)
+            {
+                var frame = decoder.Frames[i];
+                var meta  = frame.Metadata as BitmapMetadata;
+
+                int left     = GetGifMetaUShort(meta, "/imgdesc/Left",      0);
+                int top      = GetGifMetaUShort(meta, "/imgdesc/Top",       0);
+                int disposal = GetGifMetaByte  (meta, "/grctlext/Disposal", 0);
+
+                delays[i] = GetGifFrameDelay(frame);
+
+                // disposal=3: 次フレームで戻すため現在キャンバスを保存
+                if (disposal == 3) restore = canvas;
+
+                // 前フレームのキャンバスに今フレームを重ねて合成
+                var dv = new DrawingVisual();
+                using (var dc = dv.RenderOpen())
+                {
+                    if (canvas != null)
+                        dc.DrawImage(canvas, new Rect(0, 0, gifW, gifH));
+                    dc.DrawImage(frame,  new Rect(left, top, frame.PixelWidth, frame.PixelHeight));
+                }
+                var rtb = new RenderTargetBitmap(gifW, gifH, 96, 96, PixelFormats.Pbgra32);
+                rtb.Render(dv);
+                rtb.Freeze();
+                composited[i] = rtb;
+
+                // disposal メソッドに従い次フレームのベースを更新
+                switch (disposal)
+                {
+                    case 2:  canvas = null;    break; // 背景色（透明）に戻す
+                    case 3:  canvas = restore; break; // 1フレーム前の状態に戻す
+                    default: canvas = rtb;    break; // 合成結果をそのまま維持
+                }
+
+                // プログレッシブ登録（破棄されていたら中断）
+                if (i == 0) { if (!RegisterAnimArrays(index, files, composited, delays)) return; }
+                else        { if (!CommitAnimFrame(index, composited, i)) return; }
+            }
         }
 
         /// <summary>GIF フレームのメタデータから表示時間（ms）を取得する。</summary>
@@ -1643,78 +1725,70 @@ namespace ClipViewer
         }
 
         /// <summary>
-        /// アニメーション WebP の全フレームを _gifFrameCache / _gifDelayCache に格納する。
-        /// libwebp.dll が未配置の場合は例外をキャッチして静止表示にフォールバック。
-        /// DisplaySingle から UI スレッドで呼ぶこと。
+        /// アニメーション WebP の全フレームをプログレッシブに登録する（背景スレッド用）。
+        /// libwebp.dll が未配置の場合は呼び出し元（EnsureAnimFrames）が例外を握りつぶし静止表示にフォールバック。
         /// </summary>
-        private void LoadWebPFrames(int index, string path)
+        private void DecodeWebPFramesCore(int index, string path, List<string> files)
         {
-            lock (_cacheLock)
-            {
-                if (_gifFrameCache.ContainsKey(index)) return;
-            }
-
+            byte[]   data = File.ReadAllBytes(path);
+            GCHandle pin  = GCHandle.Alloc(data, GCHandleType.Pinned);
             try
             {
-                byte[]   data = File.ReadAllBytes(path);
-                GCHandle pin  = GCHandle.Alloc(data, GCHandleType.Pinned);
+                var webpData = new WebPData
+                {
+                    bytes = pin.AddrOfPinnedObject(),
+                    size  = (UIntPtr)data.Length
+                };
+                var opts = new WebPAnimDecoderOptions
+                {
+                    color_mode  = 3, // MODE_BGRA → PixelFormats.Bgra32 と一致
+                    use_threads = 1
+                };
+
+                IntPtr dec = WebPAnimDecoderNew(ref webpData, ref opts, WebPDemuxAbiVersion);
+                if (dec == IntPtr.Zero) return;
+
                 try
                 {
-                    var webpData = new WebPData
+                    if (WebPAnimDecoderGetInfo(dec, out WebPAnimInfo info) == 0) return;
+
+                    int count = (int)info.frame_count;
+                    if (count <= 1)
                     {
-                        bytes = pin.AddrOfPinnedObject(),
-                        size  = (UIntPtr)data.Length
-                    };
-                    var opts = new WebPAnimDecoderOptions
-                    {
-                        color_mode  = 3, // MODE_BGRA → PixelFormats.Bgra32 と一致
-                        use_threads = 1
-                    };
-
-                    IntPtr dec = WebPAnimDecoderNew(ref webpData, ref opts, WebPDemuxAbiVersion);
-                    if (dec == IntPtr.Zero) return;
-
-                    try
-                    {
-                        if (WebPAnimDecoderGetInfo(dec, out WebPAnimInfo info) == 0) return;
-
-                        int count = (int)info.frame_count;
-                        if (count <= 1) return; // 静止 WebP
-
-                        int w = (int)info.canvas_width;
-                        int h = (int)info.canvas_height;
-
-                        var composited = new BitmapSource[count];
-                        var delays     = new int[count];
-                        int prevTs     = 0;
-
-                        for (int i = 0; i < count; i++)
-                        {
-                            if (WebPAnimDecoderGetNext(dec, out IntPtr buf, out int ts) == 0) break;
-
-                            delays[i] = Math.Max(1, ts - prevTs); // WebPはms精度なので下限1ms（GIFの20ms制限は不要）
-                            prevTs    = ts;
-
-                            // libwebp が出力する合成済み BGRA バッファ → BitmapSource（即時コピー）
-                            int stride = w * 4;
-                            var bmp = BitmapSource.Create(
-                                w, h, 96, 96, PixelFormats.Bgra32, null,
-                                buf, h * stride, stride);
-                            bmp.Freeze();
-                            composited[i] = bmp;
-                        }
-
-                        lock (_cacheLock)
-                        {
-                            _gifFrameCache[index] = composited;
-                            _gifDelayCache[index] = delays;
-                        }
+                        lock (_cacheLock) { if (ReferenceEquals(_clipFiles, files)) _knownStatic.Add(index); }
+                        return; // 静止 WebP
                     }
-                    finally { WebPAnimDecoderDelete(dec); }
+
+                    int w = (int)info.canvas_width;
+                    int h = (int)info.canvas_height;
+
+                    var composited = new BitmapSource[count];
+                    var delays     = new int[count];
+                    int prevTs     = 0;
+
+                    for (int i = 0; i < count; i++)
+                    {
+                        if (WebPAnimDecoderGetNext(dec, out IntPtr buf, out int ts) == 0) break;
+
+                        delays[i] = Math.Max(1, ts - prevTs); // WebPはms精度なので下限1ms（GIFの20ms制限は不要）
+                        prevTs    = ts;
+
+                        // libwebp が出力する合成済み BGRA バッファ → BitmapSource（即時コピー）
+                        int stride = w * 4;
+                        var bmp = BitmapSource.Create(
+                            w, h, 96, 96, PixelFormats.Bgra32, null,
+                            buf, h * stride, stride);
+                        bmp.Freeze();
+                        composited[i] = bmp;
+
+                        // プログレッシブ登録（破棄されていたら中断）
+                        if (i == 0) { if (!RegisterAnimArrays(index, files, composited, delays)) return; }
+                        else        { if (!CommitAnimFrame(index, composited, i)) return; }
+                    }
                 }
-                finally { pin.Free(); }
+                finally { WebPAnimDecoderDelete(dec); }
             }
-            catch { /* libwebpdemux.dll 未配置またはデコード失敗 → 静止表示にフォールバック */ }
+            finally { pin.Free(); }
         }
 
         /// <summary>
@@ -1777,19 +1851,25 @@ namespace ClipViewer
         private void GifRendering_Tick(object sender, EventArgs e)
         {
             if (_gifCurrentIdx < 0 || _gifTargetImage == null || _gifPaused) return;
-            if (Stopwatch.GetTimestamp() + _earlyAdvanceTicks < _gifNextFrameTick) return;
+            long now = Stopwatch.GetTimestamp();
+            if (now + _earlyAdvanceTicks < _gifNextFrameTick) return;
 
             BitmapSource[] frames;
             int[]          delays;
+            int            avail;
             lock (_cacheLock)
             {
                 if (!_gifFrameCache.TryGetValue(_gifCurrentIdx, out frames)) return;
                 if (!_gifDelayCache.TryGetValue(_gifCurrentIdx, out delays)) return;
+                _gifAvailCache.TryGetValue(_gifCurrentIdx, out avail);
             }
+            if (avail <= 0) return;
 
-            _gifFrameIndex++;
-            if (_gifFrameIndex >= frames.Length)
+            int next = _gifFrameIndex + 1;
+            if (next >= frames.Length)
             {
+                if (avail < frames.Length) return; // 最終フレーム未デコード（通常起きない）
+
                 // 1ループ完了
                 if (_gifPlayMode == GifPlayMode.AutoAdvance)
                 {
@@ -1797,13 +1877,24 @@ namespace ClipViewer
                     NavigateNext();
                     return;
                 }
-                _gifFrameIndex = 0; // Loop: 先頭フレームへ折り返し
+                next = 0; // Loop: 先頭フレームへ折り返し
+            }
+            else if (next >= avail)
+            {
+                // 次フレームが未デコード → 現フレームを維持して待つ（デコード追い付き待ちストール）
+                return;
             }
 
-            _gifTargetImage.Source = frames[_gifFrameIndex];
+            _gifFrameIndex         = next;
+            _gifTargetImage.Source = frames[next];
 
-            // 目標時刻を「前回目標 + 次フレーム遅延」で進める（誤差蓄積防止）
-            _gifNextFrameTick += MsToTicks(delays[_gifFrameIndex]);
+            // 目標時刻を「前回目標 + 次フレーム遅延」で進める（誤差蓄積防止）。
+            // ただしストールで大幅に遅れた場合は現在時刻基準にリベースする
+            // （遅延分を取り戻そうとする高速コマ飛びを防ぐ）。
+            long target = _gifNextFrameTick + MsToTicks(delays[next]);
+            if (target < now - MsToTicks(200))
+                target = now + MsToTicks(delays[next]);
+            _gifNextFrameTick = target;
         }
 
         /// <summary>ミリ秒を Stopwatch の ticks に変換する。</summary>
@@ -1852,18 +1943,22 @@ namespace ClipViewer
 
             BitmapSource[] frames;
             int[]          delays;
+            int            avail;
             lock (_cacheLock)
             {
                 if (!_gifFrameCache.TryGetValue(_gifCurrentIdx, out frames)) return;
                 if (!_gifDelayCache.TryGetValue(_gifCurrentIdx, out delays)) return;
+                _gifAvailCache.TryGetValue(_gifCurrentIdx, out avail);
             }
+            if (avail <= 0) return;
 
             // 再生中なら自動的に一時停止
             if (!_gifPaused) _gifPaused = true;
 
+            // デコード済み範囲内でループ（プログレッシブ再生中は範囲が伸びていく）
             _gifFrameIndex = forward
-                ? (_gifFrameIndex + 1) % frames.Length
-                : (_gifFrameIndex - 1 + frames.Length) % frames.Length;
+                ? (_gifFrameIndex + 1) % avail
+                : (_gifFrameIndex - 1 + avail) % avail;
 
             if (_gifTargetImage != null)
                 _gifTargetImage.Source = frames[_gifFrameIndex];
@@ -2303,6 +2398,7 @@ namespace ClipViewer
                             _srcSizeCache.Clear();
                             _gifFrameCache.Clear();
                             _gifDelayCache.Clear();
+                            _gifAvailCache.Clear();
                             _knownAnimated.Clear();
                             _knownStatic.Clear();
                         }
@@ -2502,6 +2598,7 @@ namespace ClipViewer
                 _brokenFiles.Clear();
                 _gifFrameCache.Clear();
                 _gifDelayCache.Clear();
+                _gifAvailCache.Clear();
                 _knownAnimated.Clear();
                 _knownStatic.Clear();
             }
