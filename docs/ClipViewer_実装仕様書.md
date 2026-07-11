@@ -1,9 +1,9 @@
 # ClipViewer 仕様書
 
-**バージョン:** 0.8.0
+**バージョン:** 0.8.1
 **対象ファイル:** `bin\Release\ClipViewer.exe`
 **作成日:** 2026-03-01
-**最終更新:** 2026-07-09
+**最終更新:** 2026-07-11
 
 ---
 
@@ -642,7 +642,7 @@ ClipViewer/
 ├── ImageFilters.cs                  モアレ軽減/シャープ化パイプライン（v0.7.0、F49/F50）
 ├── ClipFileReader.cs                .clip ファイルから画像を抽出
 ├── PsdFileReader.cs                 .psd ファイルから画像を抽出
-└── NaturalSort.cs                   StrCmpLogicalW による自然順ソート
+└── NaturalSort.cs                   StrCmpLogicalW による自然順ソート（フォルダ階層→ファイル名の2段比較）
 ```
 
 ### UI 構造（XAML）
@@ -834,7 +834,7 @@ echo "C:\path\to\ClipViewer.csproj" /p:Configuration=Release /t:Build /v:minimal
 | 画像キャッシュ上限 | 8 枚超で全クリア（大量高解像度ファイルでのメモリ管理が粗い） |
 | 見開きスキップ時の有効性チェック | `PageSkip` / `JumpFirst` / `JumpLast` は `_brokenFiles` をスキップしない |
 | `.clip` の透明プレビュー | CSP 側でプレビューが透明画像の場合、黒画面として表示される |
-| アーカイブ内サブフォルダ | 展開後フラットに収集するため、サブフォルダ内画像の順序が意図と異なる場合がある |
+| ~~アーカイブ内サブフォルダ~~ | ~~サブフォルダ内画像の順序が意図と異なる場合がある~~ → **v0.8.1で修正済み**（NaturalSort を「フォルダ階層→ファイル名」の2段比較に変更） |
 | RAR/LZH/7z は 7-Zip 依存 | 7-Zip 未インストール時はこれらのアーカイブを開けない |
 | 回転・反転の保存非対応 | 回転・反転状態はセッション内のみ有効（終了時に保存しない） |
 | EXIF 非対応フォーマット | `.clip` / `.psd` は `BitmapDecoder` で直接 EXIF を取得できないため、Detailed モードでも EXIF 欄は空になる |

@@ -16,10 +16,15 @@ namespace ClipViewer
 
         public static readonly Comparison<string> Comparer = (x, y) =>
         {
-            // ファイル名のみで比較（ディレクトリパスは無視）
-            string nameX = Path.GetFileName(x);
-            string nameY = Path.GetFileName(y);
-            return StrCmpLogicalW(nameX, nameY);
+            // ディレクトリ階層 → ファイル名 の順で自然順比較する（v0.8.1修正）。
+            // ファイル名のみの比較だと、複数フォルダ構成のアーカイブ
+            // （A\01.jpg, B\01.jpg ...）で A と B のファイルが交錯して表示される。
+            // フォルダAを全て表示し終えてからフォルダBに進むのが正しい読書順。
+            string dirX = Path.GetDirectoryName(x) ?? "";
+            string dirY = Path.GetDirectoryName(y) ?? "";
+            int d = StrCmpLogicalW(dirX, dirY);
+            if (d != 0) return d;
+            return StrCmpLogicalW(Path.GetFileName(x), Path.GetFileName(y));
         };
     }
 }
