@@ -325,6 +325,8 @@ LastSpreadAnchor(count):
 - コマ送り（F7/F8）はデコード済み範囲内でループ。AutoAdvance のページ遷移は全フレームデコード完了後のループ末尾でのみ発火
 - evict/リスト変更時は `CommitAnimFrame` の配列参照チェックが不一致となりデコードが自然に中断される
 - フレーム数1と判明したファイルは `_knownStatic` に登録して以後スキップ
+- **WebPアニメの即時判定**: `EnsureWebPAnimKnown()` がヘッダ21バイト（RIFF/WEBP/VP8X のアニメフラグ 0x02）で判定し `_knownAnimated/_knownStatic` へ即登録。`SpreadStepSize` から呼ばれるため、見開きモードでも初回表示から単ページ+デコード直行になる（GIFは従来どおり背景判定）。アニメWebPの静止フレームはフィルタ対象外
+- **先読みの保留**: 現在ファイルのアニメ初回フレームが未確定の間は `StartPrefetchSmart()` が先読みを保留し、`OnAnimFramesReady`/デコード終了時の `ResumeDeferredPrefetch()` で再開（アーカイブ開直後などコールドキャッシュ時の CPU/ディスク競合を防ぎ、再生開始を最優先する）
 
 #### GIF アニメーション
 

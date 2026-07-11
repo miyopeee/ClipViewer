@@ -114,6 +114,8 @@ namespace ClipViewer
         // ウィンドウ表示前はディスク/CPUを現在画像のデコードに集中させるため、
         // 先読みは Window_Loaded 後に開始する（多重起動時の遅延雪だるま対策）
         private bool _uiReady = false;
+        // 現在ファイルのアニメ初回フレームを最優先にするための先読み保留フラグ（v0.8.2）
+        private bool _prefetchDeferred = false;
 
         // ---- F51 シークバー ----
         private bool _seekBarShown = false;  // フェードイン済みか
@@ -541,7 +543,6 @@ namespace ClipViewer
             }
 
             EvictCache(_currentIndex);
-            if (_uiReady) StartPrefetch(_currentIndex);  // 起動中はウィンドウ表示を優先（Loaded 後に開始）
 
             // SpreadStepSize がすべての単独表示条件を包括する:
             //   単ページモード / firstSingle+先頭 / 最終ページ / 横長 / 次が横長
@@ -551,6 +552,11 @@ namespace ClipViewer
                 DisplaySpread();
 
             UpdateInfoPanel();
+
+            // 先読み開始（起動中はウィンドウ表示優先で Loaded 後に開始）。
+            // 現在ファイルのアニメ初回フレームをデコード中の場合は、
+            // CPU/ディスクをそちらに集中させるため確定まで先読みを保留する（v0.8.2）。
+            if (_uiReady) StartPrefetchSmart();
 
             if (_seekBarShown) UpdateSeekBarVisual(_currentIndex, showLabel: false);
 
@@ -1088,10 +1094,13 @@ namespace ClipViewer
             catch { /* 寸法取得に失敗した場合はフィルタなしの通常デコードにフォールバック */ }
 
             // 2) ゲーティング判定（表示スケール < 閾値 のダウンスケール時のみ適用）
+            // アニメWebPの静止フレームはフィルタ対象外（直後にアニメ再生で置き換わるため無駄。
+            // ヘッダ判定の副作用として _knownAnimated/_knownStatic も即時確定する。v0.8.2）
+            bool animatedWebP = (data == null) && EnsureWebPAnimKnown(index, path);
             FilterParams p = SnapshotFilterParams();
             bool applyFilter = false;
             int  tw = 0, th = 0;
-            if (p.AnyEnabled && srcW > 0 && srcH > 0 && _viewportPxW > 0 && _viewportPxH > 0)
+            if (!animatedWebP && p.AnyEnabled && srcW > 0 && srcH > 0 && _viewportPxW > 0 && _viewportPxH > 0)
             {
                 double fit = ComputeFitScale(srcW, srcH);
                 if (fit < _settings.MoireDownscaleThreshold && fit < 1.0)
@@ -1364,7 +1373,11 @@ namespace ClipViewer
             int next = idx + 1;
             if (IsWideImage(next)) return 1;
 
-            // アニメGIF/WebP は単独表示（キャッシュ済みのみ判定、未判定は自動切替で対応）
+            // アニメGIF/WebP は単独表示。
+            // WebP はヘッダで即時判定できる（v0.8.2）ため初回表示から正しく単ページになる。
+            // GIF・判定不能ファイルは従来どおり背景判定（TriggerAnimationCheckForSpread）で自動切替。
+            if (EnsureWebPAnimKnown(idx,  _clipFiles[idx]))  return 1;
+            if (EnsureWebPAnimKnown(next, _clipFiles[next])) return 1;
             lock (_cacheLock)
             {
                 if (_knownAnimated.Contains(idx))  return 1;
@@ -1541,6 +1554,50 @@ namespace ClipViewer
         // =========================================================
 
         /// <summary>
+        /// WebP のアニメ有無をヘッダ（VP8X 拡張フラグ）で即時判定し、_knownAnimated/_knownStatic へ登録する。
+        /// 先頭21バイトの読み取りのみでフルデコードを伴わない（v0.8.2）。
+        /// これにより見開きモードでも「一旦見開き表示→背景判定→単ページへ再表示」の遠回りをせず、
+        /// 最初から単ページ表示+アニメデコード開始に直行できる。
+        /// 戻り値: アニメ確定なら true。webp以外・判定失敗は false（既存の背景判定フローに任せる）。
+        /// </summary>
+        private bool EnsureWebPAnimKnown(int index, string path)
+        {
+            lock (_cacheLock)
+            {
+                if (_knownAnimated.Contains(index)) return true;
+                if (_knownStatic.Contains(index))   return false;
+            }
+            if (!path.EndsWith(".webp", StringComparison.OrdinalIgnoreCase)) return false;
+
+            bool animated;
+            try
+            {
+                var buf = new byte[24];
+                int n;
+                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    n = fs.Read(buf, 0, buf.Length);
+
+                // RIFF/WEBP + VP8X 拡張ヘッダのアニメーションフラグ（byte20 の 0x02）
+                // VP8X でない（VP8 / VP8L 直格納の）WebP は構造上アニメ不可 → 静止確定
+                bool riff = n >= 21
+                    && buf[0]  == (byte)'R' && buf[1]  == (byte)'I' && buf[2]  == (byte)'F' && buf[3]  == (byte)'F'
+                    && buf[8]  == (byte)'W' && buf[9]  == (byte)'E' && buf[10] == (byte)'B' && buf[11] == (byte)'P';
+                if (!riff) return false; // WebPですらない/読めない → 未登録のまま
+
+                bool vp8x = buf[12] == (byte)'V' && buf[13] == (byte)'P' && buf[14] == (byte)'8' && buf[15] == (byte)'X';
+                animated = vp8x && (buf[20] & 0x02) != 0;
+            }
+            catch { return false; }
+
+            lock (_cacheLock)
+            {
+                if (animated) _knownAnimated.Add(index);
+                else          _knownStatic.Add(index);
+            }
+            return animated;
+        }
+
+        /// <summary>
         /// アニメフレームの背景デコードを開始する（キャッシュ済み・デコード中・静止確定なら何もしない）。
         /// </summary>
         private void EnsureAnimFrames(int index, string path, string ext)
@@ -1564,6 +1621,8 @@ namespace ClipViewer
                 finally
                 {
                     lock (_cacheLock) { _animDecoding.Remove(index); }
+                    // 先読みを保留していた場合は再開（静止確定・失敗時もここで確実に解除される）
+                    Dispatcher.BeginInvoke(new Action(ResumeDeferredPrefetch));
                 }
             });
         }
@@ -1574,10 +1633,36 @@ namespace ClipViewer
         /// </summary>
         private void OnAnimFramesReady(int index)
         {
+            ResumeDeferredPrefetch();  // 初回フレーム確定 → 保留していた先読みを再開
+
             if (index != _currentIndex) return;
             if (SingleImage.Visibility != Visibility.Visible) return; // 見開き時は再描画フローに任せる
             if (_gifCurrentIdx == index) return;                       // 既に再生中
             StartGifAnimation(index, SingleImage);
+        }
+
+        /// <summary>
+        /// 先読みを開始する。ただし現在ファイルのアニメ初回フレームが未確定なら保留し、
+        /// OnAnimFramesReady / デコード終了時に ResumeDeferredPrefetch で再開する。
+        /// </summary>
+        private void StartPrefetchSmart()
+        {
+            bool animPending;
+            lock (_cacheLock)
+            {
+                animPending = _animDecoding.Contains(_currentIndex)
+                           && !_gifFrameCache.ContainsKey(_currentIndex);
+            }
+            _prefetchDeferred = animPending;
+            if (!animPending) StartPrefetch(_currentIndex);
+        }
+
+        /// <summary>保留していた先読みを再開する（多重呼び出し可・保留なしなら何もしない）。</summary>
+        private void ResumeDeferredPrefetch()
+        {
+            if (!_prefetchDeferred) return;
+            _prefetchDeferred = false;
+            StartPrefetch(_currentIndex);
         }
 
         /// <summary>
@@ -2751,7 +2836,7 @@ namespace ClipViewer
             _uiReady = true;
             UpdateViewportSize();
             RefreshFilterIfNeeded();
-            StartPrefetch(_currentIndex);  // ウィンドウ表示が済んでから先読み開始
+            StartPrefetchSmart();  // ウィンドウ表示が済んでから先読み開始（アニメデコード中は保留）
             StartupLog("Window_Loaded 完了（起動シーケンス終了）");
         }
 
