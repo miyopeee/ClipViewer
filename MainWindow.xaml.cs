@@ -82,6 +82,18 @@ namespace ClipViewer
         private string _currentArchivePath = null;
         private string _currentTempDir     = null;
 
+        // ---- 遅延展開（v0.8.4）----
+        // zip/cbz は開いた時点でエントリ列挙のみ行い、ファイル実体は「読む直前」にオンデマンド展開する。
+        // ZipArchive はスレッド非安全のため、アクセスは _zipLock で直列化する。
+        private ZipArchive                 _lazyZip;                    // 遅延展開中のZIP（null=遅延なし）
+        private readonly object            _zipLock = new object();
+        private Dictionary<string, string> _zipEntryByPath;             // temp先フルパス → ZIPエントリ名
+
+        // アーカイブ対象の画像拡張子（列挙・展開共通）
+        private static readonly HashSet<string> _archiveImageExts =
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            { ".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif" };
+
         private static readonly string[] _archiveExts =
             { ".zip", ".cbz", ".rar", ".7z", ".lzh" };
 
@@ -268,16 +280,49 @@ namespace ClipViewer
                 Path.GetFileNameWithoutExtension(archivePath) + "_" + uniqueId);
             Directory.CreateDirectory(tempDir);
 
+            string archExt = Path.GetExtension(archivePath).ToLowerInvariant();
+            bool   lazy    = (archExt == ".zip" || archExt == ".cbz");
+
             Task.Run(() =>
             {
-                List<string> files;
+                List<string> files = new List<string>();
+                var entryMap = lazy ? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) : null;
+                ZipArchive zip = null;
                 string errorMsg = null;
                 try
                 {
-                    files = ExtractImages(archivePath, tempDir);
+                    if (lazy)
+                    {
+                        // 遅延展開（v0.8.4）: エントリ列挙のみで即表示を開始する。
+                        // 実体化は EnsureExtracted（オンデマンド）と背景スイープに任せるため、
+                        // 無圧縮ZIPの巨大アーカイブでも一瞬で開ける。
+                        zip = ZipFile.OpenRead(archivePath);
+                        foreach (var entry in zip.Entries)
+                        {
+                            if (string.IsNullOrEmpty(entry.Name)) continue;
+                            if (!_archiveImageExts.Contains(
+                                    Path.GetExtension(entry.Name).ToLowerInvariant())) continue;
+
+                            string safePath = SanitizeArchivePath(entry.FullName);
+                            if (string.IsNullOrEmpty(safePath)) continue;
+
+                            string destPath = Path.Combine(tempDir, safePath);
+                            if (entryMap.ContainsKey(destPath)) continue;  // サニタイズ衝突は先勝ち
+                            entryMap[destPath] = entry.FullName;
+                            files.Add(destPath);
+                        }
+                        files.Sort(NaturalSort.Comparer);
+                    }
+                    else
+                    {
+                        // RAR/LZH/7z: 7z.exe による一括展開（従来どおり）
+                        files = ExtractImages(archivePath, tempDir);
+                    }
                 }
                 catch (Exception ex)
                 {
+                    try { zip?.Dispose(); } catch { }
+                    zip      = null;
                     files    = new List<string>();
                     errorMsg = ex.Message;
                     try { Directory.Delete(tempDir, recursive: true); } catch { }
@@ -292,6 +337,7 @@ namespace ClipViewer
                     }
                     if (files.Count == 0)
                     {
+                        try { zip?.Dispose(); } catch { }
                         ShowError($"アーカイブ内に画像が見つかりません:\n"
                                 + $"{Path.GetFileName(archivePath)}\n\nEsc で終了");
                         try { Directory.Delete(tempDir, recursive: true); } catch { }
@@ -302,6 +348,11 @@ namespace ClipViewer
                     _currentTempDir     = tempDir;
                     _clipFiles          = files;
                     _currentIndex       = 0;
+                    lock (_zipLock)
+                    {
+                        _lazyZip        = zip;       // null = 遅延なし（7z系）
+                        _zipEntryByPath = entryMap;
+                    }
 
                     // 履歴があれば前回の表示位置から再開（F52、機能ON時のみ）
                     string lastEntry = _settings.ArchiveHistoryEnabled
@@ -339,7 +390,100 @@ namespace ClipViewer
                         _resumeNotifyPending = false;
                         ShowNotification("前回の位置から再開（Home で先頭へ）", 1.5);
                     }
+
+                    // 背景で残り全エントリを順次実体化（シークバー大ジャンプ・保存操作の先回り）
+                    if (lazy) StartLazyExtractionSweep(files, zip);
                 });
+            });
+        }
+
+        // =========================================================
+        // 遅延展開（v0.8.4）
+        // =========================================================
+
+        /// <summary>
+        /// 遅延展開対象のパスなら、その場でZIPから実体化する（実体化済み・対象外なら何もしない）。
+        /// ファイル読み取りを行う処理の直前に呼ぶこと。UI/背景どちらのスレッドからも呼び出し可能。
+        /// 「.part に展開 → 完成後リネーム」により、File.Exists=true は常に完全なファイルを意味する。
+        /// </summary>
+        private void EnsureExtracted(string path)
+        {
+            var zip = _lazyZip;
+            var map = _zipEntryByPath;
+            if (zip == null || map == null) return;
+            if (!map.TryGetValue(path, out string entryName)) return;  // 遅延対象外（通常ファイル等）
+            if (File.Exists(path)) return;
+
+            lock (_zipLock)
+            {
+                if (File.Exists(path)) return;
+                if (!ReferenceEquals(_lazyZip, zip)) return;  // アーカイブ切替/終了済み → 中断
+
+                var entry = zip.GetEntry(entryName);
+                if (entry == null) return;
+
+                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                string part = path + ".part";
+                entry.ExtractToFile(part, overwrite: true);
+                File.Move(part, path);
+            }
+        }
+
+        /// <summary>
+        /// ファイル先頭 count バイトを読む。未展開の遅延ZIPエントリは実体化せず
+        /// アーカイブから直接読む（WebPアニメ判定等のヘッダスニッフ用・低コスト）。
+        /// 読めなければ null。
+        /// </summary>
+        private byte[] ReadFileHead(string path, int count)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    var buf = new byte[count];
+                    int n;
+                    using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                        n = fs.Read(buf, 0, count);
+                    if (n < count) Array.Resize(ref buf, Math.Max(0, n));
+                    return buf;
+                }
+
+                var zip = _lazyZip;
+                var map = _zipEntryByPath;
+                if (zip != null && map != null && map.TryGetValue(path, out string entryName))
+                {
+                    lock (_zipLock)
+                    {
+                        if (!ReferenceEquals(_lazyZip, zip)) return null;
+                        var entry = zip.GetEntry(entryName);
+                        if (entry == null) return null;
+                        var buf = new byte[count];
+                        int total = 0, n;
+                        using (var s = entry.Open())
+                            while (total < count && (n = s.Read(buf, total, count - total)) > 0) total += n;
+                        if (total < count) Array.Resize(ref buf, total);
+                        return buf;
+                    }
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        /// <summary>
+        /// 遅延展開の背景スイープ。先頭から順に全エントリを実体化しておく。
+        /// アーカイブが切り替わったら参照不一致で自動中断する。
+        /// </summary>
+        private void StartLazyExtractionSweep(List<string> files, ZipArchive zip)
+        {
+            Task.Run(() =>
+            {
+                Thread.Sleep(1000);  // 初回表示・アニメデコードにIOを譲る
+                foreach (string f in files)
+                {
+                    if (!ReferenceEquals(_lazyZip, zip)) return;
+                    try { EnsureExtracted(f); } catch { }
+                }
             });
         }
 
@@ -491,8 +635,41 @@ namespace ClipViewer
         }
 
         /// <summary>現在の一時展開ディレクトリを削除してフィールドをクリアする。</summary>
+        /// <summary>
+        /// %TEMP%\ClipViewer 配下の古い展開フォルダを削除する（強制終了等の残骸対策、v0.8.4）。
+        /// 24時間以内のフォルダと自プロセスの現行フォルダは残す（多重起動中の他インスタンスを保護）。
+        /// startup.log などフォルダ直下のファイルには触れない。
+        /// </summary>
+        private void CleanupStaleTempDirs()
+        {
+            try
+            {
+                string baseDir = Path.Combine(Path.GetTempPath(), "ClipViewer");
+                if (!Directory.Exists(baseDir)) return;
+                foreach (string d in Directory.GetDirectories(baseDir))
+                {
+                    try
+                    {
+                        if (string.Equals(d, _currentTempDir, StringComparison.OrdinalIgnoreCase)) continue;
+                        if (Directory.GetLastWriteTimeUtc(d) > DateTime.UtcNow.AddHours(-24)) continue;
+                        Directory.Delete(d, recursive: true);
+                    }
+                    catch { /* 使用中フォルダ等は無視 */ }
+                }
+            }
+            catch { }
+        }
+
         private void CleanupTempDir()
         {
+            // 遅延展開中のZIPを閉じる（オンデマンド展開・背景スイープは参照不一致で自動中断する）
+            lock (_zipLock)
+            {
+                try { _lazyZip?.Dispose(); } catch { }
+                _lazyZip        = null;
+                _zipEntryByPath = null;
+            }
+
             if (_currentTempDir != null && Directory.Exists(_currentTempDir))
             {
                 try { Directory.Delete(_currentTempDir, recursive: true); }
@@ -671,6 +848,8 @@ namespace ClipViewer
             string ext  = Path.GetExtension(path).ToLowerInvariant();
             try
             {
+                EnsureExtracted(path);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
+
                 if (ext == ".gif")
                 {
                     // GifBitmapDecoder はメタデータ読み取りのみ（ピクセルデコードなし）で軽量
@@ -899,6 +1078,8 @@ namespace ClipViewer
 
             try
             {
+                EnsureExtracted(path);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
+
                 using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
                     var decoder = BitmapDecoder.Create(
@@ -1034,6 +1215,8 @@ namespace ClipViewer
 
             try
             {
+                EnsureExtracted(path);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
+
                 byte[] data = null;
                 if (ext == ".clip" || ext == ".psd")
                 {
@@ -1569,25 +1752,19 @@ namespace ClipViewer
             }
             if (!path.EndsWith(".webp", StringComparison.OrdinalIgnoreCase)) return false;
 
-            bool animated;
-            try
-            {
-                var buf = new byte[24];
-                int n;
-                using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-                    n = fs.Read(buf, 0, buf.Length);
+            // 遅延展開ZIPのエントリは実体化せずアーカイブから直接ヘッダを読む（低コスト、v0.8.4）
+            var buf = ReadFileHead(path, 24);
+            if (buf == null || buf.Length < 21) return false;
 
-                // RIFF/WEBP + VP8X 拡張ヘッダのアニメーションフラグ（byte20 の 0x02）
-                // VP8X でない（VP8 / VP8L 直格納の）WebP は構造上アニメ不可 → 静止確定
-                bool riff = n >= 21
-                    && buf[0]  == (byte)'R' && buf[1]  == (byte)'I' && buf[2]  == (byte)'F' && buf[3]  == (byte)'F'
-                    && buf[8]  == (byte)'W' && buf[9]  == (byte)'E' && buf[10] == (byte)'B' && buf[11] == (byte)'P';
-                if (!riff) return false; // WebPですらない/読めない → 未登録のまま
+            // RIFF/WEBP + VP8X 拡張ヘッダのアニメーションフラグ（byte20 の 0x02）
+            // VP8X でない（VP8 / VP8L 直格納の）WebP は構造上アニメ不可 → 静止確定
+            bool riff =
+                   buf[0]  == (byte)'R' && buf[1]  == (byte)'I' && buf[2]  == (byte)'F' && buf[3]  == (byte)'F'
+                && buf[8]  == (byte)'W' && buf[9]  == (byte)'E' && buf[10] == (byte)'B' && buf[11] == (byte)'P';
+            if (!riff) return false; // WebPですらない/読めない → 未登録のまま
 
-                bool vp8x = buf[12] == (byte)'V' && buf[13] == (byte)'P' && buf[14] == (byte)'8' && buf[15] == (byte)'X';
-                animated = vp8x && (buf[20] & 0x02) != 0;
-            }
-            catch { return false; }
+            bool vp8x = buf[12] == (byte)'V' && buf[13] == (byte)'P' && buf[14] == (byte)'8' && buf[15] == (byte)'X';
+            bool animated = vp8x && (buf[20] & 0x02) != 0;
 
             lock (_cacheLock)
             {
@@ -1705,6 +1882,8 @@ namespace ClipViewer
         /// </summary>
         private void DecodeGifFramesCore(int index, string path, List<string> files)
         {
+            EnsureExtracted(path);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
+
             GifBitmapDecoder decoder;
             using (var fs = File.OpenRead(path))
             {
@@ -1815,6 +1994,8 @@ namespace ClipViewer
         /// </summary>
         private void DecodeWebPFramesCore(int index, string path, List<string> files)
         {
+            EnsureExtracted(path);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
+
             byte[]   data = File.ReadAllBytes(path);
             GCHandle pin  = GCHandle.Alloc(data, GCHandleType.Pinned);
             try
@@ -2596,6 +2777,7 @@ namespace ClipViewer
 
             try
             {
+                EnsureExtracted(_clipFiles[targetIdx]);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
                 Process.Start(_settings.ExternalEditor, $"\"{_clipFiles[targetIdx]}\"");
             }
             catch
@@ -2624,6 +2806,7 @@ namespace ClipViewer
             try
             {
                 string src  = _clipFiles[targetIdx];
+                EnsureExtracted(src);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
                 string dest = Path.Combine(_settings.SaveDirectory, Path.GetFileName(src));
                 File.Copy(src, dest, overwrite: true);
                 ShowNotification($"{Path.GetFileName(src)} を保存しました", 1.0);
@@ -2660,6 +2843,7 @@ namespace ClipViewer
 
             try
             {
+                EnsureExtracted(sourcePath);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
                 File.Copy(sourcePath, dlg.FileName, overwrite: true);
             }
             catch
@@ -2866,6 +3050,9 @@ namespace ClipViewer
             RefreshFilterIfNeeded();
             StartPrefetchSmart();  // ウィンドウ表示が済んでから先読み開始（アニメデコード中は保留）
             StartupLog("Window_Loaded 完了（起動シーケンス終了）");
+
+            // 強制終了などで残った古い一時展開フォルダを背景で掃除（v0.8.4）
+            Task.Run(new Action(CleanupStaleTempDirs));
         }
 
         private void Window_LocationChanged(object sender, EventArgs e)
