@@ -964,6 +964,9 @@ namespace ClipViewer
             InfoPageNumber.Text = pageNum;
             InfoZoom.Text       = BuildZoomText(detailFileIdx);
 
+            RefreshAnimFrameInfo();
+            UpdateTransformInfo();
+
             bool detailed = (_infoMode == InfoDisplayMode.Detailed);
             var detailVis = detailed ? Visibility.Visible : Visibility.Collapsed;
             InfoPixelSize.Visibility = detailVis;
@@ -1032,6 +1035,9 @@ namespace ClipViewer
             InfoPixelSize.Visibility = detailVis;
             InfoFullPath.Visibility  = detailVis;
             InfoExif.Visibility      = detailVis;
+
+            RefreshAnimFrameInfo();
+            UpdateTransformInfo();
 
             if (detailed)
                 UpdateDetailedInfo(nameIdx >= 0 ? nameIdx : _currentIndex);
@@ -1111,6 +1117,55 @@ namespace ClipViewer
         /// <summary>表示用文字列を最大 max 文字に切り詰める（超過分は「…」）。</summary>
         private static string Truncate(string s, int max)
             => (s != null && s.Length > max) ? s.Substring(0, max) + "…" : s;
+
+        /// <summary>アニメ再生フレーム表示を更新する（v0.8.5。再生ティックから値渡しで呼ぶ低コスト版）。</summary>
+        private void UpdateAnimFrameInfo(int current, int total)
+        {
+            if (_infoMode == InfoDisplayMode.Off)
+            {
+                if (InfoAnimFrame.Visibility != Visibility.Collapsed)
+                    InfoAnimFrame.Visibility = Visibility.Collapsed;
+                return;
+            }
+            InfoAnimFrame.Text = $"フレーム: {current} / {total}";
+            if (InfoAnimFrame.Visibility != Visibility.Visible)
+                InfoAnimFrame.Visibility = Visibility.Visible;
+        }
+
+        /// <summary>アニメ再生フレーム表示を現在状態から更新する（パネル再構築時用）。非再生時は非表示。</summary>
+        private void RefreshAnimFrameInfo()
+        {
+            if (_gifCurrentIdx < 0)
+            {
+                InfoAnimFrame.Visibility = Visibility.Collapsed;
+                return;
+            }
+            BitmapSource[] frames;
+            lock (_cacheLock) { _gifFrameCache.TryGetValue(_gifCurrentIdx, out frames); }
+            if (frames == null)
+            {
+                InfoAnimFrame.Visibility = Visibility.Collapsed;
+                return;
+            }
+            UpdateAnimFrameInfo(_gifFrameIndex + 1, frames.Length);
+        }
+
+        /// <summary>回転・反転ステータス表示を更新する（v0.8.5）。無変換時は非表示。</summary>
+        private void UpdateTransformInfo()
+        {
+            if (_infoMode == InfoDisplayMode.Off || (_rotationAngle == 0 && !_flipH && !_flipV))
+            {
+                InfoTransform.Visibility = Visibility.Collapsed;
+                return;
+            }
+            var parts = new List<string>();
+            if (_rotationAngle != 0) parts.Add($"回転 {_rotationAngle}°");
+            if (_flipH && _flipV)    parts.Add("反転 左右+上下");
+            else if (_flipH)         parts.Add("反転 左右");
+            else if (_flipV)         parts.Add("反転 上下");
+            InfoTransform.Text       = string.Join(" / ", parts);
+            InfoTransform.Visibility = Visibility.Visible;
+        }
 
         /// <summary>
         /// ズーム率の表示文字列を作る（v0.8.0改良）。
@@ -2172,6 +2227,7 @@ namespace ClipViewer
             _gifAdvancePending = false;
 
             targetImage.Source = frames[0];
+            UpdateAnimFrameInfo(1, frames.Length);
 
             // vsync 駆動アニメ開始（DispatcherTimer より高精度）
             _gifNextFrameTick    = Stopwatch.GetTimestamp() + MsToTicks(delays[0]);
@@ -2192,6 +2248,7 @@ namespace ClipViewer
             _gifPaused      = false;
             _gifForceLoop      = false;
             _gifAdvancePending = false;
+            InfoAnimFrame.Visibility = Visibility.Collapsed;
         }
 
         /// <summary>
@@ -2243,6 +2300,7 @@ namespace ClipViewer
 
             _gifFrameIndex         = next;
             _gifTargetImage.Source = frames[next];
+            UpdateAnimFrameInfo(next + 1, frames.Length);
 
             // 目標時刻を「前回目標 + 次フレーム遅延」で進める（誤差蓄積防止）。
             // ただしストールで大幅に遅れた場合は現在時刻基準にリベースする
@@ -2318,6 +2376,7 @@ namespace ClipViewer
 
             if (_gifTargetImage != null)
                 _gifTargetImage.Source = frames[_gifFrameIndex];
+            UpdateAnimFrameInfo(_gifFrameIndex + 1, frames.Length);
 
             // ステップ後に再生再開した場合の目標時刻をリセット
             _gifNextFrameTick = Stopwatch.GetTimestamp() + MsToTicks(delays[_gifFrameIndex]);
@@ -2532,6 +2591,8 @@ namespace ClipViewer
             }
             RotateFitScale.ScaleX = k;
             RotateFitScale.ScaleY = k;
+
+            UpdateTransformInfo();  // 回転・反転ステータス表示を追従（v0.8.5）
         }
 
         /// <summary>

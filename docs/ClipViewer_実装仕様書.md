@@ -258,6 +258,8 @@ LastSpreadAnchor(count):
 | `InfoFileName` | Basic以上 | 表示中ファイル名（見開き時は対象ページ） |
 | `InfoPageNumber` | Basic以上 | ページ番号（`N / 総数` または `N - M / 総数`） |
 | `InfoZoom` | Basic以上 | ズーム率。%はオリジナル原寸=100%の実表示倍率で、Fit時は `Fit (63%)` 形式で併記 — `ApplyZoom()` が直接更新 |
+| `InfoAnimFrame` | Basic以上・アニメ再生中のみ | 再生フレーム番号（`フレーム: n / 総数`、毎フレーム追従） |
+| `InfoTransform` | Basic以上・回転/反転中のみ | 変換ステータス（`回転 90° / 反転 左右` 等） |
 | `InfoPixelSize` | Detailedのみ | 画像ピクセルサイズ（`BitmapSource.PixelWidth × PixelHeight`） |
 | `InfoFullPath` | Detailedのみ | 表示中ファイルのフルパス |
 | `InfoExif` | Detailedのみ | EXIFサマリー（`BitmapDecoder` → `BitmapMetadata`）|

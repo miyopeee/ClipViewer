@@ -104,6 +104,20 @@
                                FontSize="13"
                                FontFamily="Segoe UI"
                                TextWrapping="Wrap" />
+                    <!-- アニメ再生フレーム番号（再生中のみ表示、v0.8.5） -->
+                    <TextBlock x:Name="InfoAnimFrame"
+                               Foreground="White"
+                               FontSize="13"
+                               FontFamily="Segoe UI"
+                               TextWrapping="Wrap"
+                               Visibility="Collapsed" />
+                    <!-- 回転・反転ステータス（変換中のみ表示、v0.8.5） -->
+                    <TextBlock x:Name="InfoTransform"
+                               Foreground="White"
+                               FontSize="13"
+                               FontFamily="Segoe UI"
+                               TextWrapping="Wrap"
+                               Visibility="Collapsed" />
                     <!-- Detailed 情報（Detailed モード時のみ表示） -->
                     <TextBlock x:Name="InfoPixelSize"
                                Foreground="#FFBBBBBB"
