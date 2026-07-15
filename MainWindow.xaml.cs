@@ -1423,16 +1423,88 @@ namespace ClipViewer
         private void ToggleMoireFilter()
         {
             _settings.MoireFilterEnabled = !_settings.MoireFilterEnabled;
-            ShowNotification("モアレ軽減フィルタ: " + (_settings.MoireFilterEnabled ? "ON" : "OFF"), 1.0);
-            DisplayCurrent();  // 署名変化でキャッシュが再構築される
+            ShowNotification("モアレ軽減フィルタ: " + (_settings.MoireFilterEnabled ? "ON" : "OFF")
+                + FilterGateNote(), 1.0);
+            ApplyFilterToggle();
         }
 
         // F11: シャープ化フィルタ ON/OFF（状態は終了時に ini へ保存）
         private void ToggleSharpen()
         {
             _settings.SharpenEnabled = !_settings.SharpenEnabled;
-            ShowNotification("シャープ化フィルタ: " + (_settings.SharpenEnabled ? "ON" : "OFF"), 1.0);
-            DisplayCurrent();
+            ShowNotification("シャープ化フィルタ: " + (_settings.SharpenEnabled ? "ON" : "OFF")
+                + FilterGateNote(), 1.0);
+            ApplyFilterToggle();
+        }
+
+        /// <summary>
+        /// 現在画像がフィルタの適用対象外（縮小表示でない）場合の通知補足。
+        /// 「ONにしたのに何も変わらない」の正体を通知で明示する（v0.8.5）。
+        /// </summary>
+        private string FilterGateNote()
+        {
+            if (!SnapshotFilterParams().AnyEnabled) return "";
+            int idx = GetInfoTargetIndex();
+            if (idx < 0) return "";
+            int[] src = null;
+            lock (_cacheLock) { _srcSizeCache.TryGetValue(idx, out src); }
+            if (src == null || src[0] <= 0 || src[1] <= 0) return "";
+            if (_viewportPxW <= 0 || _viewportPxH <= 0) return "";
+            double fit = ComputeFitScale(src[0], src[1]);
+            bool applies = fit < _settings.MoireDownscaleThreshold && fit < 1.0;
+            return applies ? "" : "（この画像は適用外: 縮小表示時のみ有効）";
+        }
+
+        /// <summary>
+        /// フィルタトグル時の再表示（v0.8.5改良）。
+        /// 旧実装は UI スレッドで現在画像を同期再デコード+フィルタ計算しており、
+        /// 大きい画像ではキー押下からフリーズして「反応が鈍い」体感になっていた。
+        /// 新実装: 通知は即時表示し、表示中の画像は背景スレッドで新パラメータ版を
+        /// 生成してから差し替える（生成完了まで旧画像を表示し続ける）。
+        /// </summary>
+        private void ApplyFilterToggle()
+        {
+            string sig = BuildFilterSignature();
+            if (sig == _filterSignature) return;  // 表示結果に影響なし（全OFF→全OFF等）
+            _filterSignature = sig;
+            lock (_cacheLock) { _imageCache.Clear(); }
+
+            if (_clipFiles.Count == 0 || _currentIndex < 0) return;
+
+            // 再生成対象 = 現在表示中のインデックス（見開きなら両ページ）
+            var targets = new List<int> { _currentIndex };
+            if (_displayMode == DisplayMode.Spread && SpreadStepSize(_currentIndex) == 2)
+            {
+                ResolveSpreadIndices(out int l, out int r);
+                if (l >= 0 && !targets.Contains(l)) targets.Add(l);
+                if (r >= 0 && !targets.Contains(r)) targets.Add(r);
+            }
+
+            List<string> files = _clipFiles;
+            Task.Run(() =>
+            {
+                var results = new Dictionary<int, BitmapSource>();
+                foreach (int idx in targets)
+                {
+                    var bmp = LoadImageCore(idx, files);
+                    if (bmp != null) results[idx] = bmp;
+                }
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (!ReferenceEquals(_clipFiles, files)) return;   // リスト切替済み
+                    if (BuildFilterSignature() != _filterSignature) return;  // さらに設定が変わった
+                    lock (_cacheLock)
+                    {
+                        foreach (var kv in results)
+                        {
+                            _imageCache[kv.Key] = kv.Value;
+                            _wideCache[kv.Key]  = kv.Value.PixelWidth > kv.Value.PixelHeight;
+                        }
+                    }
+                    if (!targets.Contains(_currentIndex)) return;      // 別ページへ移動済み
+                    DisplayCurrent();  // キャッシュヒットで即時再表示（追加デコードなし）
+                }));
+            });
         }
 
         /// <summary>スライディングウィンドウ外の画像キャッシュを削除する。</summary>
@@ -1467,6 +1539,7 @@ namespace ClipViewer
             _prefetchCts = new CancellationTokenSource();
             CancellationToken token = _prefetchCts.Token;
             List<string>      files = _clipFiles;
+            string            sig   = _filterSignature;  // 開始時点のフィルタ署名（v0.8.5）
 
             Task.Run(() =>
             {
@@ -1476,7 +1549,7 @@ namespace ClipViewer
                     if (token.IsCancellationRequested) return;
                     int idx = anchor + i;
                     if (idx >= files.Count) break;
-                    PrefetchOne(idx, files, token);
+                    PrefetchOne(idx, files, token, sig);
                 }
                 // 後方先読み
                 for (int i = 1; i <= PrefetchBehind; i++)
@@ -1484,12 +1557,12 @@ namespace ClipViewer
                     if (token.IsCancellationRequested) return;
                     int idx = anchor - i;
                     if (idx < 0) break;
-                    PrefetchOne(idx, files, token);
+                    PrefetchOne(idx, files, token, sig);
                 }
             }, token);
         }
 
-        private void PrefetchOne(int idx, List<string> files, CancellationToken token)
+        private void PrefetchOne(int idx, List<string> files, CancellationToken token, string sig)
         {
             bool skip;
             lock (_cacheLock)
@@ -1501,7 +1574,9 @@ namespace ClipViewer
             {
                 lock (_cacheLock)
                 {
-                    if (ReferenceEquals(_clipFiles, files))
+                    // フィルタ署名が変わっていたら破棄（トグル直後に旧設定の画像を
+                    // キャッシュへ書き戻してしまう競合の防止、v0.8.5）
+                    if (ReferenceEquals(_clipFiles, files) && sig == _filterSignature)
                     {
                         _imageCache[idx] = bmp;
                         _wideCache[idx]  = bmp.PixelWidth > bmp.PixelHeight;
