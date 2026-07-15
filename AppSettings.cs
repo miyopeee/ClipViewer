@@ -125,7 +125,9 @@ namespace ClipViewer
         public BindingDirection LastBinding        { get; set; } = BindingDirection.Right;
         public InfoDisplayMode  LastInfoMode       { get; set; } = InfoDisplayMode.Basic;
         public bool             LastFirstSingle    { get; set; } = false;
-        public GifPlayMode      LastGifPlayMode    { get; set; } = GifPlayMode.Loop;
+        // v0.8.5: デフォルトを AutoAdvance に変更（loop名アニメのループ固定と組み合わせ、
+        // シームレス連番は自動遷移・ループ物は滞留、が既定動作になる）
+        public GifPlayMode      LastGifPlayMode    { get; set; } = GifPlayMode.AutoAdvance;
         public bool             LastIsFullscreen   { get; set; } = true;
         public double           LastWindowedLeft   { get; set; } = 100;
         public double           LastWindowedTop    { get; set; } = 100;

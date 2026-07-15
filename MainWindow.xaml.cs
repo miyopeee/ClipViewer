@@ -67,6 +67,10 @@ namespace ClipViewer
         private int          _gifFrameIndex;
         private bool         _gifPaused;
         private int          _gifCurrentIdx = -1;       // アニメ中のファイルインデックス（-1=非再生）
+        // loop名アニメ（v0.8.5）: ファイル名に "loop" を含むアニメは再生モード設定に関係なくループ固定。
+        // その再生中のページ送りはループ末尾まで保留する（シームレス連番+ループ混在セットの最適化）
+        private bool         _gifForceLoop;              // 表示中アニメがループ固定中か
+        private bool         _gifAdvancePending;         // ページ送りをループ末尾まで保留中か
 
         // vsync と frame delay のズレを吸収する早め判定幅（2ms）
         private static readonly long _earlyAdvanceTicks = Stopwatch.Frequency * 2 / 1000;
@@ -2087,6 +2091,10 @@ namespace ClipViewer
             _gifTargetImage = targetImage;
             _gifFrameIndex  = 0;
             _gifPaused      = false;
+            // loop名アニメはループ固定（v0.8.5）。設定自体は変更・保存しない
+            _gifForceLoop   = Path.GetFileName(_clipFiles[fileIndex])
+                                  .IndexOf("loop", StringComparison.OrdinalIgnoreCase) >= 0;
+            _gifAdvancePending = false;
 
             targetImage.Source = frames[0];
 
@@ -2107,6 +2115,8 @@ namespace ClipViewer
             _gifCurrentIdx  = -1;
             _gifTargetImage = null;
             _gifPaused      = false;
+            _gifForceLoop      = false;
+            _gifAdvancePending = false;
         }
 
         /// <summary>
@@ -2136,8 +2146,13 @@ namespace ClipViewer
             {
                 if (avail < frames.Length) return; // 最終フレーム未デコード（通常起きない）
 
-                // 1ループ完了
-                if (_gifPlayMode == GifPlayMode.AutoAdvance)
+                // 1ループ完了。
+                // loop名アニメ: 保留中のページ送りがあればここ（ループの切れ目）で遷移、なければループ継続。
+                // 通常アニメ:   AutoAdvance モードなら自動遷移。
+                bool advance = _gifForceLoop
+                    ? _gifAdvancePending
+                    : (_gifPlayMode == GifPlayMode.AutoAdvance);
+                if (advance)
                 {
                     StopGifAnimation();
                     NavigateNext();
@@ -2240,6 +2255,15 @@ namespace ClipViewer
         private void NavigateNext()
         {
             if (_clipFiles.Count == 0) return;
+
+            // loop名アニメの再生中はページ送りをループ末尾まで保留する（v0.8.5）。
+            // 2回目のページ送りで即時遷移（保留のキャンセル）。一時停止中は即時。
+            if (_gifForceLoop && _gifCurrentIdx >= 0 && !_gifPaused && !_gifAdvancePending)
+            {
+                _gifAdvancePending = true;
+                ShowNotification("ループ末尾で次へ（再押下で即時）", 1.0);
+                return;
+            }
 
             if (_displayMode == DisplayMode.Single)
             {

@@ -176,7 +176,7 @@ namespace ClipViewer
                             s.LastFirstSingle = ParseBool(val, false);
                             break;
                         case "LastGifPlayMode":
-                            s.LastGifPlayMode = ParseGifPlayMode(val, GifPlayMode.Loop);
+                            s.LastGifPlayMode = ParseGifPlayMode(val, GifPlayMode.AutoAdvance);
                             break;
                         case "LastIsFullscreen":
                             s.LastIsFullscreen = ParseBool(val, true);
@@ -219,7 +219,7 @@ namespace ClipViewer
             var lines = new List<string>
             {
                 "; ========================================",
-                "; ClipViewer v0.8.4 設定ファイル",
+                "; ClipViewer v0.8.5 設定ファイル",
                 "; ========================================",
                 "; 対応フォーマット：.clip / .psd / .jpg / .jpeg / .png / .webp / .gif / .avif",
                 "; アーカイブ：.zip / .cbz（直接対応）/ .rar / .lzh / .7z（7-Zip 要インストール）",
