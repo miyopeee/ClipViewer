@@ -502,11 +502,12 @@ namespace ClipViewer
                 _settings.ArchiveHistoryCount);
         }
 
-        // アーカイブ履歴機能 ON/OFF（キーは ini の ToggleArchiveHistory で割り当て。状態は終了時に保存）
+        // アーカイブ履歴機能 ON/OFF（キーは ini の ToggleArchiveHistory で割り当て。トグル時に即 ini 保存）
         private void ToggleArchiveHistory()
         {
             _settings.ArchiveHistoryEnabled = !_settings.ArchiveHistoryEnabled;
             ShowNotification("アーカイブ履歴: " + (_settings.ArchiveHistoryEnabled ? "ON" : "OFF"), 1.0);
+            IniFileManager.Save(_settings);
         }
 
         /// <summary>展開先一時ディレクトリからの相対パスを返す（履歴の照合キー）。</summary>
@@ -1474,21 +1475,23 @@ namespace ClipViewer
             _filterRefreshTimer.Start();
         }
 
-        // F9: モアレ軽減フィルタ ON/OFF（状態は終了時に ini へ保存）
+        // F9: モアレ軽減フィルタ ON/OFF（トグル時に即 ini 保存、v0.8.5）
         private void ToggleMoireFilter()
         {
             _settings.MoireFilterEnabled = !_settings.MoireFilterEnabled;
             ShowNotification("モアレ軽減フィルタ: " + (_settings.MoireFilterEnabled ? "ON" : "OFF")
                 + FilterGateNote(), 1.0);
+            IniFileManager.Save(_settings);  // 終了時保存だけだと多重起動の後閉じ・強制終了で消えるため即時保存
             ApplyFilterToggle();
         }
 
-        // F11: シャープ化フィルタ ON/OFF（状態は終了時に ini へ保存）
+        // F11: シャープ化フィルタ ON/OFF（トグル時に即 ini 保存、v0.8.5）
         private void ToggleSharpen()
         {
             _settings.SharpenEnabled = !_settings.SharpenEnabled;
             ShowNotification("シャープ化フィルタ: " + (_settings.SharpenEnabled ? "ON" : "OFF")
                 + FilterGateNote(), 1.0);
+            IniFileManager.Save(_settings);
             ApplyFilterToggle();
         }
 

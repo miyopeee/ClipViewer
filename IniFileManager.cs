@@ -306,7 +306,7 @@ namespace ClipViewer
                 "",
                 "[Filters]",
                 "; モアレ軽減（Stage1）/ シャープ化（Stage2）の2段パイプライン",
-                "; Enabled 系は F9/F11 トグルの状態が終了時に保存される",
+                "; Enabled 系は F9/F11 トグルを押した瞬間に保存される",
                 "; モアレ軽減フィルタ 有効/無効",
                 $"MoireFilterEnabled={s.MoireFilterEnabled}",
                 "; モアレ軽減アルゴリズム（Off / Area / Lanczos / Gaussian）※現状 Lanczos のみ実装",
