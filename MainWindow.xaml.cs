@@ -507,7 +507,7 @@ namespace ClipViewer
         {
             _settings.ArchiveHistoryEnabled = !_settings.ArchiveHistoryEnabled;
             ShowNotification("アーカイブ履歴: " + (_settings.ArchiveHistoryEnabled ? "ON" : "OFF"), 1.0);
-            IniFileManager.Save(_settings);
+            PersistStateNow();
         }
 
         /// <summary>展開先一時ディレクトリからの相対パスを返す（履歴の照合キー）。</summary>
@@ -1481,7 +1481,7 @@ namespace ClipViewer
             _settings.MoireFilterEnabled = !_settings.MoireFilterEnabled;
             ShowNotification("モアレ軽減フィルタ: " + (_settings.MoireFilterEnabled ? "ON" : "OFF")
                 + FilterGateNote(), 1.0);
-            IniFileManager.Save(_settings);  // 終了時保存だけだと多重起動の後閉じ・強制終了で消えるため即時保存
+            PersistStateNow();  // 終了時保存だけだと多重起動の後閉じ・強制終了で消えるため即時保存
             ApplyFilterToggle();
         }
 
@@ -1491,7 +1491,7 @@ namespace ClipViewer
             _settings.SharpenEnabled = !_settings.SharpenEnabled;
             ShowNotification("シャープ化フィルタ: " + (_settings.SharpenEnabled ? "ON" : "OFF")
                 + FilterGateNote(), 1.0);
-            IniFileManager.Save(_settings);
+            PersistStateNow();
             ApplyFilterToggle();
         }
 
@@ -1797,6 +1797,7 @@ namespace ClipViewer
                 ApplyTargetScreen(_settings.TargetScreen);
                 Cursor          = Cursors.None;
             }
+            PersistStateNow();
         }
 
         /// <summary>ナビゲーション履歴スタックをクリアする。</summary>
@@ -2328,6 +2329,7 @@ namespace ClipViewer
             ShowNotification(_gifPlayMode == GifPlayMode.Loop
                 ? "アニメ: 無限ループ"
                 : "アニメ: 1ループ→自動遷移");
+            PersistStateNow();
         }
 
         /// <summary>アニメの一時停止／再生を切替える。非表示中は無視。</summary>
@@ -2673,6 +2675,7 @@ namespace ClipViewer
             NormalizeAnchor();
             ResetZoom();
             DisplayCurrent();
+            PersistStateNow();  // モード系トグルは即時保存（v0.8.5）
         }
 
         private void ToggleBindingDirection()
@@ -2680,6 +2683,7 @@ namespace ClipViewer
             _bindingDirection = (_bindingDirection == BindingDirection.Right)
                 ? BindingDirection.Left : BindingDirection.Right;
             DisplayCurrent();
+            PersistStateNow();
         }
 
         // F1: Basic ↔ Off トグル
@@ -2691,6 +2695,7 @@ namespace ClipViewer
             InfoPanel.Visibility = _infoMode != InfoDisplayMode.Off
                 ? Visibility.Visible : Visibility.Collapsed;
             if (_infoMode != InfoDisplayMode.Off) UpdateInfoPanel();
+            PersistStateNow();
         }
 
         // Tab: Off → Basic → Detailed サイクル
@@ -2703,6 +2708,7 @@ namespace ClipViewer
             InfoPanel.Visibility = _infoMode != InfoDisplayMode.Off
                 ? Visibility.Visible : Visibility.Collapsed;
             if (_infoMode != InfoDisplayMode.Off) UpdateInfoPanel();
+            PersistStateNow();
         }
 
         private void ToggleFirstSingle()
@@ -2714,6 +2720,7 @@ namespace ClipViewer
             // ON→OFF: preferForward=false（後退補正、既定）
             NormalizeAnchor(preferForward: turningOn);
             DisplayCurrent();
+            PersistStateNow();
         }
 
         // =========================================================
@@ -3250,7 +3257,12 @@ namespace ClipViewer
             _prefetchCts?.Cancel();
             SaveArchivePosition();  // アーカイブ閲覧中なら表示位置を記録（F52）
             CleanupTempDir();
+            PersistStateNow();
+        }
 
+        /// <summary>現在の動作状態を _settings の [State] へ反映する。</summary>
+        private void SyncStateToSettings()
+        {
             _settings.LastMode           = _displayMode;
             _settings.LastBinding        = _bindingDirection;
             _settings.LastInfoMode       = _infoMode;
@@ -3261,8 +3273,18 @@ namespace ClipViewer
             _settings.LastWindowedTop    = _windowedTop;
             _settings.LastWindowedWidth  = _windowedWidth;
             _settings.LastWindowedHeight = _windowedHeight;
+        }
 
-            IniFileManager.SaveState(_settings);
+        /// <summary>
+        /// 現在状態を即時に ini へ永続化する（v0.8.5）。
+        /// モード系トグル操作のたびに呼ぶことで、多重起動時の
+        /// 「最後に閉じたインスタンスによる巻き戻り」と強制終了での消失を防ぐ。
+        /// （ウィンドウ位置・サイズは移動のたびには保存せず、トグル時・終了時に同乗する）
+        /// </summary>
+        private void PersistStateNow()
+        {
+            SyncStateToSettings();
+            IniFileManager.Save(_settings);
         }
 
         // =========================================================
