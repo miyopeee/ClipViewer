@@ -67,7 +67,8 @@
 - **検討中（未実装）**: タスクトレイ常駐+グローバルホットキー（Shift+Ctrl+任意キー）でのメニューポップ。RegisterHotKey P/Invoke + NotifyIcon で実現可能と回答済み。メニュー内容の仕様待ち
 - **GitHubで公開開始（2026/07/11）** — https://github.com/miyopeee/ClipViewer （MIT、公開用スナップショットは `cowork\ClipViewer-github\`）
 
-### v0.8.5（2026/07/14）
+### v0.8.5（2026/07/14-17）
+- **BF03: 長パスでのクラッシュ修正（2026/07/17）** — フルパス260文字超のファイルがあるフォルダを開くと NaturalSort 比較器内の `Path.GetDirectoryName` が `PathTooLongException` → Sortごとプロセス中止していた。比較器を純粋文字列操作化+App.configで長パスサポート有効化（地雷リスト参照）。**配布物に ClipViewer.exe.config が追加された**
 - **loop名アニメのループ固定（F53）** — ファイル名に`loop`を含むアニメは再生モード無視でループ固定。再生中のページ送りはループ末尾まで保留し切れ目で遷移（再押下で即時、一時停止中は即時、戻し/ジャンプは即時）。`_gifForceLoop`/`_gifAdvancePending` フラグで実装、設定の変更・保存はしない
 - **デフォルト再生モードを AutoAdvance に変更** — loop名固定との組み合わせで「連番は流れ、ループ物は滞留」が既定動作に。既存iniのLastGifPlayModeはそのまま尊重される
 - **検証ノウハウ**: UI自動操作は WScript.Shell SendKeys ではなく **PostMessage(WM_KEYDOWN) をウィンドウハンドル宛てに直接送る**こと（SendKeysはフォアグラウンド奪取に失敗すると他アプリへキーが漏れる）。ウィンドウ単体キャプチャは PrintWindow(flags=2)。検証スクリプト例はAIセッションのメモリ参照
@@ -174,6 +175,14 @@ Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(
 （上限は使用感フィードバックで調整済み: 撮影日40/機種60/タイトル800/コメント800文字、全体1000文字。1000字程度ならレイアウトは1秒未満で問題ない）
 **補足**: AI生成画像のプロンプト/ワークフローJSONは **Title（EXIF ImageDescription、タグ270）に入っていることが多い**（ComfyUI 等、実測5万文字）。Comment は空のことが多いので、切り詰め調整時は Title 側を忘れないこと。
 **教訓**: この問題は長らく「exeをコピーし直すと直る謎の遅延」として誤認されていた。実際は復旧儀式の ini 削除で `LastInfoMode` が Basic にリセットされていたのが「治った」理由。症状と対処の因果は startup.log（起動診断ログ）で確定した。
+
+---
+
+### 🚨 MAX_PATH超のパスで Path API がクラッシュ（v0.8.5で修正）
+**症状**: 特定フォルダを開くとアプリが即クラッシュ（ウィンドウすら出ない）。
+**原因**: AI生成画像の長大ファイル名でフルパスが260文字を超えると、`Path.GetDirectoryName` 等が `PathTooLongException` を投げる。NaturalSort の比較器内で発生したため `List.Sort` ごと未処理例外でプロセス中止していた。
+**解決策**: ①比較器はパスAPIを使わず `LastIndexOf('\\')` + `Substring` の純粋文字列操作に変更 ②App.config の `AppContextSwitchOverrides`（UseLegacyPathHandling=false; BlockLongPaths=false）で長パス対応を有効化（.NET 4.6.2以降ランタイムで有効。**ClipViewer.exe.config を必ず exe と一緒に配布すること**）。
+**教訓**: ホットパス（比較器・イベントハンドラ）では例外を投げ得る Path API を避ける。ファイル名処理は文字列操作で。
 
 ---
 
