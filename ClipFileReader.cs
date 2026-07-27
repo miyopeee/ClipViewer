@@ -27,7 +27,7 @@ namespace ClipViewer
         /// </summary>
         public static byte[] ExtractPreviewImage(string clipFilePath)
         {
-            byte[] fileBytes = File.ReadAllBytes(clipFilePath);
+            byte[] fileBytes = File.ReadAllBytes(LongPath.Fix(clipFilePath));
 
             long sqliteOffset = FindSqliteOffset(fileBytes);
             if (sqliteOffset < 0)

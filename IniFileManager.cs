@@ -22,6 +22,12 @@ namespace ClipViewer
         private static string IniPath =>
             Path.Combine(AppDomain.CurrentDomain.BaseDirectory, FileName);
 
+        /// <summary>
+        /// 直近に自分が書き込んだ（または再読み込みで取り込んだ）ini の更新時刻。
+        /// これとファイルの実 mtime の差で「外部編集の有無」を判定する（F54, v0.8.6）。
+        /// </summary>
+        private static DateTime _lastWrittenUtc = DateTime.MinValue;
+
         // =========================================================
         // Load
         // =========================================================
@@ -37,6 +43,51 @@ namespace ClipViewer
             }
 
             try
+            {
+                ParseInto(s);
+            }
+            catch
+            {
+                return new AppSettings();
+            }
+
+            // 常に最新フォーマット（コメント・新キー）で上書きして反映
+            Save(s);
+            return s;
+        }
+
+        /// <summary>直近の自己書き込み（または取り込み）以降に ini が外部から変更されているか。</summary>
+        public static bool HasExternalChange()
+        {
+            try
+            {
+                return File.Exists(IniPath)
+                    && File.GetLastWriteTimeUtc(IniPath) != _lastWrittenUtc;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// 実行中の設定再読み込み用パース（F54, v0.8.6）。
+        /// Load() と異なりファイルへの書き戻しを行わない
+        /// （エディタで開いたままのファイルを裏で書き換えない）。
+        /// 読めない場合（書き込み途中のロック等）は null を返し、呼び出し側は現状維持する。
+        /// </summary>
+        public static AppSettings TryParseForReload()
+        {
+            try
+            {
+                if (!File.Exists(IniPath)) return null;
+                var s = new AppSettings();
+                ParseInto(s);
+                _lastWrittenUtc = File.GetLastWriteTimeUtc(IniPath);  // この変更は取り込み済み
+                return s;
+            }
+            catch { return null; }
+        }
+
+        private static void ParseInto(AppSettings s)
+        {
             {
                 string section = "";
 
@@ -87,9 +138,10 @@ namespace ClipViewer
                         case "NavigateDirUp":     s.NavigateDirUp     = ParseKeys(val, new[] { Key.Up });        break;
                         case "NavigateDirDown":   s.NavigateDirDown   = ParseKeys(val, new[] { Key.Down });      break;
                         case "OpenIniFile":       s.OpenIniFile       = ParseKeys(val, new[] { Key.F2 });        break;
+                        case "ReloadCache":       s.ReloadCache       = ParseKeys(val, new[] { Key.R });         break;
                         case "ToggleWindowMode":  s.ToggleWindowMode  = ParseKeys(val, new[] { Key.Return });    break;
                         case "ToggleMoireFilter": s.ToggleMoireFilter = ParseKeys(val, new[] { Key.F9 });        break;
-                        case "ToggleSharpen":     s.ToggleSharpen     = ParseKeys(val, new[] { Key.F11 });       break;
+                        case "ToggleSharpen":     s.ToggleSharpen     = ParseKeys(val, new[] { Key.F10 });       break;
                         case "ToggleArchiveHistory": s.ToggleArchiveHistory = ParseKeys(val, new[] { Key.None }); break;
                         case "ToggleGifMode":     s.ToggleGifMode     = ParseKeys(val, new[] { Key.F5 });        break;
                         case "GifPausePlay":      s.GifPausePlay      = ParseKeys(val, new[] { Key.F6 });        break;
@@ -188,14 +240,6 @@ namespace ClipViewer
                     }
                 }
             }
-            catch
-            {
-                return new AppSettings();
-            }
-
-            // 常に最新フォーマット（コメント・新キー）で上書きして反映
-            Save(s);
-            return s;
         }
 
         // =========================================================
@@ -204,7 +248,11 @@ namespace ClipViewer
 
         public static void Save(AppSettings s)
         {
-            try { File.WriteAllLines(IniPath, BuildLines(s)); }
+            try
+            {
+                File.WriteAllLines(IniPath, BuildLines(s));
+                _lastWrittenUtc = File.GetLastWriteTimeUtc(IniPath);  // 自己書き込みは外部変更と区別する
+            }
             catch { }
         }
 
@@ -219,10 +267,12 @@ namespace ClipViewer
             var lines = new List<string>
             {
                 "; ========================================",
-                "; ClipViewer v0.8.5 設定ファイル",
+                "; ClipViewer v0.8.11 設定ファイル",
                 "; ========================================",
                 "; 対応フォーマット：.clip / .psd / .jpg / .jpeg / .png / .webp / .gif / .avif",
                 "; アーカイブ：.zip / .cbz（直接対応）/ .rar / .lzh / .7z（7-Zip 要インストール）",
+                "; 起動中でも編集保存→ClipViewerのウィンドウに戻った時点で自動反映される（再起動不要）",
+                ";（[State] セクションはアプリが自動管理するため、起動中の手動編集は反映されない）",
                 "",
                 "[KeyBindings]",
                 "; 複数キーはカンマ区切りで指定可（例: NextPage=Left,A）",
@@ -258,6 +308,8 @@ namespace ClipViewer
                 $"NavigateDirDown={string.Join(",", s.NavigateDirDown)}",
                 "; iniファイルをエディタで開く",
                 $"OpenIniFile={string.Join(",", s.OpenIniFile)}",
+                "; 再読み込み（フォルダのファイル一覧と画像キャッシュを破棄して読み直す）",
+                $"ReloadCache={string.Join(",", s.ReloadCache)}",
                 "; フルスクリーン／ウィンドウモード切替（Return = Enter キー）",
                 $"ToggleWindowMode={string.Join(",", s.ToggleWindowMode)}",
                 "; モアレ軽減フィルタ ON/OFF トグル",

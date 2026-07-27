@@ -26,7 +26,7 @@ namespace ClipViewer
         /// </summary>
         public static byte[] ExtractPreviewImage(string psdFilePath)
         {
-            byte[] data = File.ReadAllBytes(psdFilePath);
+            byte[] data = File.ReadAllBytes(LongPath.Fix(psdFilePath));
 
             // ヘッダー検証
             if (data.Length < 26) return null;

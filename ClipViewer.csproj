@@ -8,6 +8,7 @@
     <OutputType>WinExe</OutputType>
     <RootNamespace>ClipViewer</RootNamespace>
     <AssemblyName>ClipViewer</AssemblyName>
+    <ApplicationIcon>Resources\ClipViewer.ico</ApplicationIcon>
     <TargetFrameworkVersion>v4.6</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <ProjectTypeGuids>{60dc8134-eba5-43b8-bcc9-bb4bc16c2548};{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}</ProjectTypeGuids>
@@ -77,6 +78,7 @@
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="NaturalSort.cs" />
+    <Compile Include="LongPath.cs" />
     <None Include="App.config" />
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />

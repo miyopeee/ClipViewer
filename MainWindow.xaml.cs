@@ -67,10 +67,14 @@ namespace ClipViewer
         private int          _gifFrameIndex;
         private bool         _gifPaused;
         private int          _gifCurrentIdx = -1;       // アニメ中のファイルインデックス（-1=非再生）
-        // loop名アニメ（v0.8.5）: ファイル名に "loop" を含むアニメは再生モード設定に関係なくループ固定。
-        // その再生中のページ送りはループ末尾まで保留する（シームレス連番+ループ混在セットの最適化）
-        private bool         _gifForceLoop;              // 表示中アニメがループ固定中か
+        // _loop識別子アニメ（v0.8.5新設、v0.8.8で仕様変更）:
+        // ファイル名末尾（拡張子除く）が "_loop" のアニメはページ送り操作まで強制ループ、
+        // "_loopN"（N=数字）は N 回ループ再生後に自動遷移。再生モード設定より優先、設定は変更・保存しない。
+        // 強制ループ中のページ送りは即時遷移せずループ末尾まで再生してから遷移（再押下で即時）
+        private bool         _gifForceLoop;              // 表示中アニメが_loop識別子付きか
         private bool         _gifAdvancePending;         // ページ送りをループ末尾まで保留中か
+        private int          _gifLoopLimit;              // _loopN の N（0=無制限=_loop）
+        private int          _gifLoopCount;              // 完了したループ回数
 
         // vsync と frame delay のズレを吸収する早め判定幅（2ms）
         private static readonly long _earlyAdvanceTicks = Stopwatch.Frequency * 2 / 1000;
@@ -100,6 +104,15 @@ namespace ClipViewer
 
         private static readonly string[] _archiveExts =
             { ".zip", ".cbz", ".rar", ".7z", ".lzh" };
+
+        // 通常フォルダ閲覧の対象拡張子（Directory.GetFiles 用ワイルドカード、F18）。
+        // 列挙箇所（初期ロード / 兄弟ディレクトリ移動 / 再読み込み）で共有する
+        private static readonly string[] _viewerExtPatterns =
+            { "*.clip", "*.psd", "*.jpg", "*.jpeg", "*.png", "*.webp", "*.gif", "*.avif" };
+
+        // 直近に列挙した通常フォルダ（再読み込み時のフォールバック。空フォルダで開いた場合でも
+        // ファイル追加後の再読み込みができるように保持する。F55）
+        private string _currentDirectory = null;
 
         // ---- ズーム状態 ----
         private const double ZoomMin  = 0.10;
@@ -202,6 +215,9 @@ namespace ClipViewer
 
             BuildActionMap();
             LoadFileList(initialFilePath);
+
+            // ini 外部変更の自動再読み込み（F54, v0.8.6）: エディタから戻った時に発火
+            Activated += Window_Activated;
             StartupLog("ctor 完了");
         }
 
@@ -217,7 +233,7 @@ namespace ClipViewer
                 return;
             }
 
-            if (!File.Exists(initialFilePath))
+            if (!File.Exists(LongPath.Fix(initialFilePath)))
             {
                 ShowError($"ファイルが見つかりません:\n{initialFilePath}\n\nEsc で終了");
                 return;
@@ -234,10 +250,10 @@ namespace ClipViewer
             string directory = Path.GetDirectoryName(initialFilePath);
 
             // F18: .clip / .psd / .jpg / .jpeg / .png / .webp / .gif / .avif を対象とする
-            var extensions = new[] { "*.clip", "*.psd", "*.jpg", "*.jpeg", "*.png", "*.webp", "*.gif", "*.avif" };
-            var allFiles   = new List<string>();
-            foreach (string ext in extensions)
-                allFiles.AddRange(Directory.GetFiles(directory, ext));
+            _currentDirectory = directory;
+            var allFiles = new List<string>();
+            foreach (string ext in _viewerExtPatterns)
+                allFiles.AddRange(Directory.GetFiles(LongPath.Fix(directory), ext));
 
             if (allFiles.Count == 0)
             {
@@ -300,7 +316,7 @@ namespace ClipViewer
                         // 遅延展開（v0.8.4）: エントリ列挙のみで即表示を開始する。
                         // 実体化は EnsureExtracted（オンデマンド）と背景スイープに任せるため、
                         // 無圧縮ZIPの巨大アーカイブでも一瞬で開ける。
-                        zip = ZipFile.OpenRead(archivePath);
+                        zip = ZipFile.OpenRead(LongPath.Fix(archivePath));
                         foreach (var entry in zip.Entries)
                         {
                             if (string.IsNullOrEmpty(entry.Name)) continue;
@@ -373,18 +389,7 @@ namespace ClipViewer
                         }
                     }
 
-                    lock (_cacheLock)
-                    {
-                        _brokenFiles.Clear();
-                        _imageCache.Clear();
-                        _wideCache.Clear();
-                        _srcSizeCache.Clear();
-                        _gifFrameCache.Clear();
-                        _gifDelayCache.Clear();
-                        _gifAvailCache.Clear();
-                        _knownAnimated.Clear();
-                        _knownStatic.Clear();
-                    }
+                    ClearImageCaches();
                     ClearNavHistory();
                     NormalizeAnchor();
                     SeekFirstValid();
@@ -416,20 +421,20 @@ namespace ClipViewer
             var map = _zipEntryByPath;
             if (zip == null || map == null) return;
             if (!map.TryGetValue(path, out string entryName)) return;  // 遅延対象外（通常ファイル等）
-            if (File.Exists(path)) return;
+            if (File.Exists(LongPath.Fix(path))) return;
 
             lock (_zipLock)
             {
-                if (File.Exists(path)) return;
+                if (File.Exists(LongPath.Fix(path))) return;
                 if (!ReferenceEquals(_lazyZip, zip)) return;  // アーカイブ切替/終了済み → 中断
 
                 var entry = zip.GetEntry(entryName);
                 if (entry == null) return;
 
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
+                Directory.CreateDirectory(LongPath.Fix(Path.GetDirectoryName(path)));
                 string part = path + ".part";
-                entry.ExtractToFile(part, overwrite: true);
-                File.Move(part, path);
+                entry.ExtractToFile(LongPath.Fix(part), overwrite: true);
+                File.Move(LongPath.Fix(part), LongPath.Fix(path));
             }
         }
 
@@ -442,11 +447,11 @@ namespace ClipViewer
         {
             try
             {
-                if (File.Exists(path))
+                if (File.Exists(LongPath.Fix(path)))
                 {
                     var buf = new byte[count];
                     int n;
-                    using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (var fs = new FileStream(LongPath.Fix(path), FileMode.Open, FileAccess.Read, FileShare.Read))
                         n = fs.Read(buf, 0, count);
                     if (n < count) Array.Resize(ref buf, Math.Max(0, n));
                     return buf;
@@ -537,7 +542,7 @@ namespace ClipViewer
             if (ext == ".zip" || ext == ".cbz")
             {
                 // 組み込みライブラリで展開（追加依存なし）
-                using (var zip = ZipFile.OpenRead(archivePath))
+                using (var zip = ZipFile.OpenRead(LongPath.Fix(archivePath)))
                 {
                     foreach (var entry in zip.Entries)
                     {
@@ -549,8 +554,8 @@ namespace ClipViewer
                         if (string.IsNullOrEmpty(safePath)) continue;
 
                         string destPath = Path.Combine(destDir, safePath);
-                        Directory.CreateDirectory(Path.GetDirectoryName(destPath));
-                        entry.ExtractToFile(destPath, overwrite: true);
+                        Directory.CreateDirectory(LongPath.Fix(Path.GetDirectoryName(destPath)));
+                        entry.ExtractToFile(LongPath.Fix(destPath), overwrite: true);
                     }
                 }
             }
@@ -858,7 +863,7 @@ namespace ClipViewer
                 if (ext == ".gif")
                 {
                     // GifBitmapDecoder はメタデータ読み取りのみ（ピクセルデコードなし）で軽量
-                    using (var fs = File.OpenRead(path))
+                    using (var fs = File.OpenRead(LongPath.Fix(path)))
                     {
                         var dec = new GifBitmapDecoder(fs,
                             BitmapCreateOptions.DelayCreation,
@@ -869,7 +874,7 @@ namespace ClipViewer
                 else if (ext == ".webp")
                 {
                     // WebPAnimDecoderGetInfo のみ呼び出し（GetNext は呼ばない = フレームデコードなし）
-                    byte[]   data = File.ReadAllBytes(path);
+                    byte[]   data = File.ReadAllBytes(LongPath.Fix(path));
                     GCHandle pin  = GCHandle.Alloc(data, GCHandleType.Pinned);
                     try
                     {
@@ -1091,7 +1096,7 @@ namespace ClipViewer
             {
                 EnsureExtracted(path);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
 
-                using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                using (var stream = new FileStream(LongPath.Fix(path), FileMode.Open, FileAccess.Read, FileShare.Read))
                 {
                     var decoder = BitmapDecoder.Create(
                         stream,
@@ -1133,9 +1138,40 @@ namespace ClipViewer
                 InfoAnimFrame.Visibility = Visibility.Visible;
         }
 
+        /// <summary>
+        /// アニメ再生モード・一時停止の情報表示を更新する（v0.8.8）。
+        /// アニメ表示中かつ情報表示ONなら「再生モード」を必ず表示し、一時停止中のみ「一時停止中」を追加。
+        /// 並びは フレーム → 再生モード → 一時停止（XAMLの定義順）。
+        /// </summary>
+        private void UpdateAnimStatusInfo()
+        {
+            if (_gifCurrentIdx < 0 || _infoMode == InfoDisplayMode.Off)
+            {
+                InfoAnimMode.Visibility  = Visibility.Collapsed;
+                InfoAnimPause.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            string mode;
+            if (_gifForceLoop)
+                mode = _gifLoopLimit > 0
+                    ? $"再生モード: ループ {Math.Min(_gifLoopCount + 1, _gifLoopLimit)}/{_gifLoopLimit}回→自動遷移"
+                    : "再生モード: ループ固定（_loop）";
+            else
+                mode = _gifPlayMode == GifPlayMode.Loop
+                    ? "再生モード: 無限ループ"
+                    : "再生モード: 1ループ→自動遷移";
+            InfoAnimMode.Text       = mode;
+            InfoAnimMode.Visibility = Visibility.Visible;
+
+            InfoAnimPause.Text       = "一時停止中";
+            InfoAnimPause.Visibility = _gifPaused ? Visibility.Visible : Visibility.Collapsed;
+        }
+
         /// <summary>アニメ再生フレーム表示を現在状態から更新する（パネル再構築時用）。非再生時は非表示。</summary>
         private void RefreshAnimFrameInfo()
         {
+            UpdateAnimStatusInfo();
             if (_gifCurrentIdx < 0)
             {
                 InfoAnimFrame.Visibility = Visibility.Collapsed;
@@ -1326,7 +1362,7 @@ namespace ClipViewer
                 }
                 else
                 {
-                    using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    using (var fs = new FileStream(LongPath.Fix(path), FileMode.Open, FileAccess.Read, FileShare.Read))
                     {
                         var dec = BitmapDecoder.Create(fs, BitmapCreateOptions.DelayCreation, BitmapCacheOption.None);
                         srcW = dec.Frames[0].PixelWidth;
@@ -1371,12 +1407,17 @@ namespace ClipViewer
             }
             else
             {
-                bmp.BeginInit();
-                bmp.UriSource   = new Uri(path, UriKind.Absolute);
-                bmp.CacheOption = BitmapCacheOption.OnLoad;
-                if (applyFilter && (long)tw * 2 < srcW) bmp.DecodePixelWidth = tw * 2;
-                bmp.EndInit();
-                bmp.Freeze();
+                // UriSource は WPF が WIC ネイティブAPIへパスをそのまま渡すため MAX_PATH 超で失敗する。
+                // FileStream(System.IO=長パス対応済み)経由の StreamSource でデコードする（BF04, v0.8.6）
+                using (var fs = new FileStream(LongPath.Fix(path), FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    bmp.BeginInit();
+                    bmp.StreamSource = fs;
+                    bmp.CacheOption  = BitmapCacheOption.OnLoad;
+                    if (applyFilter && (long)tw * 2 < srcW) bmp.DecodePixelWidth = tw * 2;
+                    bmp.EndInit();
+                    bmp.Freeze();
+                }
             }
 
             // 4) ソース原寸を記録（Detailed 情報表示用）
@@ -1485,7 +1526,7 @@ namespace ClipViewer
             ApplyFilterToggle();
         }
 
-        // F11: シャープ化フィルタ ON/OFF（トグル時に即 ini 保存、v0.8.5）
+        // F10: シャープ化フィルタ ON/OFF（トグル時に即 ini 保存、v0.8.5 / v0.8.10 で F11→F10）
         private void ToggleSharpen()
         {
             _settings.SharpenEnabled = !_settings.SharpenEnabled;
@@ -1563,6 +1604,115 @@ namespace ClipViewer
                     DisplayCurrent();  // キャッシュヒットで即時再表示（追加デコードなし）
                 }));
             });
+        }
+
+        /// <summary>
+        /// デコード済みキャッシュを全て破棄する（ファイルリストが変わる操作の共通処理）。
+        /// _animDecoding は「実行中の背景デコード」を示す進行フラグでありキャッシュではないため
+        /// クリアしない（消すと同一ファイルの二重デコードが走る）。
+        /// </summary>
+        private void ClearImageCaches()
+        {
+            lock (_cacheLock)
+            {
+                _imageCache.Clear();
+                _wideCache.Clear();
+                _srcSizeCache.Clear();
+                _brokenFiles.Clear();
+                _gifFrameCache.Clear();
+                _gifDelayCache.Clear();
+                _gifAvailCache.Clear();
+                _knownAnimated.Clear();
+                _knownStatic.Clear();
+            }
+        }
+
+        /// <summary>
+        /// ファイルリストとキャッシュを読み直す（F55, v0.8.9。デフォルト R キー）。
+        /// 外部での追加・削除・上書き編集（外部エディタでの保存、AI生成の追加出力など）を
+        /// 再起動せずに反映する。表示位置は「今見ているファイル」をパスで照合して維持し、
+        /// そのファイルが消えていた場合は同じ順位付近へフォールバックする。
+        /// アーカイブモードでは展開済みの中身は変化しないためリストは維持し、キャッシュのみ破棄する。
+        /// </summary>
+        private void ReloadCache()
+        {
+            string currentPath = (_currentIndex >= 0 && _currentIndex < _clipFiles.Count)
+                ? _clipFiles[_currentIndex]
+                : null;
+
+            StopGifAnimation();
+            _prefetchCts?.Cancel();
+
+            int  oldCount = _clipFiles.Count;
+            bool archive  = _currentArchivePath != null;
+
+            // 常に新しい List インスタンスへ差し替える。背景デコードは書き戻し前に
+            // ReferenceEquals(_clipFiles, files) を確認するため、差し替えるだけで
+            // 実行中タスクの結果が新しいキャッシュを汚さなくなる（v0.8.2以降の既存ガードを利用）
+            List<string> files;
+            if (archive)
+            {
+                files = new List<string>(_clipFiles);
+            }
+            else
+            {
+                string dir = (currentPath != null)
+                    ? Path.GetDirectoryName(currentPath)
+                    : _currentDirectory;
+                if (string.IsNullOrEmpty(dir))
+                {
+                    ShowNotification("エラー：再読み込み対象のフォルダがありません");
+                    return;
+                }
+                try
+                {
+                    files = new List<string>();
+                    foreach (string ext in _viewerExtPatterns)
+                        files.AddRange(Directory.GetFiles(LongPath.Fix(dir), ext));
+                    files.Sort(NaturalSort.Comparer);
+                }
+                catch
+                {
+                    ShowNotification("エラー：フォルダを読み直せませんでした");
+                    return;
+                }
+                _currentDirectory = dir;
+            }
+
+            _clipFiles = files;
+            ClearImageCaches();
+            ClearNavHistory();
+
+            if (_clipFiles.Count == 0)
+            {
+                _currentIndex      = -1;
+                ResetZoom();
+                SingleImage.Source = null;
+                LeftImage.Source   = null;
+                RightImage.Source  = null;
+                ShowError("表示できるファイルがありません。\n\nEsc で終了");
+                return;
+            }
+
+            // 表示位置の復元（ズーム倍率は同一ページの再表示のため維持する）
+            int idx = (currentPath != null)
+                ? _clipFiles.FindIndex(
+                      f => string.Equals(f, currentPath, StringComparison.OrdinalIgnoreCase))
+                : -1;
+            bool kept = idx >= 0;
+            if (!kept) idx = Math.Min(Math.Max(_currentIndex, 0), _clipFiles.Count - 1);
+            _currentIndex = idx;
+            NormalizeAnchor();
+
+            DisplayCurrent();
+
+            int delta = _clipFiles.Count - oldCount;
+            string note = archive        ? "（アーカイブ）"
+                        : delta > 0      ? $"（+{delta}）"
+                        : delta < 0      ? $"（{delta}）"
+                        : "";
+            ShowNotification($"再読み込み: {_clipFiles.Count}件{note}"
+                + (kept ? "" : " ※表示中のファイルは削除されました"), 1.0);
         }
 
         /// <summary>スライディングウィンドウ外の画像キャッシュを削除する。</summary>
@@ -2023,7 +2173,7 @@ namespace ClipViewer
             EnsureExtracted(path);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
 
             GifBitmapDecoder decoder;
-            using (var fs = File.OpenRead(path))
+            using (var fs = File.OpenRead(LongPath.Fix(path)))
             {
                 decoder = new GifBitmapDecoder(fs,
                     BitmapCreateOptions.PreservePixelFormat,
@@ -2134,7 +2284,7 @@ namespace ClipViewer
         {
             EnsureExtracted(path);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
 
-            byte[]   data = File.ReadAllBytes(path);
+            byte[]   data = File.ReadAllBytes(LongPath.Fix(path));
             GCHandle pin  = GCHandle.Alloc(data, GCHandleType.Pinned);
             try
             {
@@ -2225,13 +2375,21 @@ namespace ClipViewer
             _gifTargetImage = targetImage;
             _gifFrameIndex  = 0;
             _gifPaused      = false;
-            // loop名アニメはループ固定（v0.8.5）。設定自体は変更・保存しない
-            _gifForceLoop   = Path.GetFileName(_clipFiles[fileIndex])
-                                  .IndexOf("loop", StringComparison.OrdinalIgnoreCase) >= 0;
+            // _loop識別子の解析（v0.8.8）: ファイル名末尾（拡張子除く）の _loop / _loopN のみ有効
+            var loopMatch = System.Text.RegularExpressions.Regex.Match(
+                Path.GetFileNameWithoutExtension(_clipFiles[fileIndex]),
+                @"_loop(\d+)?$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+            _gifForceLoop = loopMatch.Success;
+            _gifLoopLimit = (loopMatch.Success && loopMatch.Groups[1].Success)
+                ? Math.Max(1, int.Parse(loopMatch.Groups[1].Value))
+                : 0;
+            _gifLoopCount      = 0;
             _gifAdvancePending = false;
 
             targetImage.Source = frames[0];
             UpdateAnimFrameInfo(1, frames.Length);
+            UpdateAnimStatusInfo();
 
             // vsync 駆動アニメ開始（DispatcherTimer より高精度）
             _gifNextFrameTick    = Stopwatch.GetTimestamp() + MsToTicks(delays[0]);
@@ -2252,7 +2410,11 @@ namespace ClipViewer
             _gifPaused      = false;
             _gifForceLoop      = false;
             _gifAdvancePending = false;
+            _gifLoopLimit      = 0;
+            _gifLoopCount      = 0;
             InfoAnimFrame.Visibility = Visibility.Collapsed;
+            InfoAnimMode.Visibility  = Visibility.Collapsed;
+            InfoAnimPause.Visibility = Visibility.Collapsed;
         }
 
         /// <summary>
@@ -2283,10 +2445,12 @@ namespace ClipViewer
                 if (avail < frames.Length) return; // 最終フレーム未デコード（通常起きない）
 
                 // 1ループ完了。
-                // loop名アニメ: 保留中のページ送りがあればここ（ループの切れ目）で遷移、なければループ継続。
-                // 通常アニメ:   AutoAdvance モードなら自動遷移。
+                // _loop識別子アニメ: 保留中のページ送りがあればここ（ループの切れ目）で遷移。
+                //   _loopN は規定回数の再生完了でも遷移。それ以外はループ継続。
+                // 通常アニメ: AutoAdvance モードなら自動遷移。
+                _gifLoopCount++;
                 bool advance = _gifForceLoop
-                    ? _gifAdvancePending
+                    ? (_gifAdvancePending || (_gifLoopLimit > 0 && _gifLoopCount >= _gifLoopLimit))
                     : (_gifPlayMode == GifPlayMode.AutoAdvance);
                 if (advance)
                 {
@@ -2295,6 +2459,7 @@ namespace ClipViewer
                     return;
                 }
                 next = 0; // Loop: 先頭フレームへ折り返し
+                UpdateAnimStatusInfo();  // _loopN の「n/N回」表示を更新（ループ毎のみ=低頻度）
             }
             else if (next >= avail)
             {
@@ -2330,6 +2495,7 @@ namespace ClipViewer
                 ? "アニメ: 無限ループ"
                 : "アニメ: 1ループ→自動遷移");
             PersistStateNow();
+            UpdateAnimStatusInfo();  // 再生中なら情報パネルの再生モード表示も追従（v0.8.8）
         }
 
         /// <summary>アニメの一時停止／再生を切替える。非表示中は無視。</summary>
@@ -2350,6 +2516,7 @@ namespace ClipViewer
             }
 
             ShowNotification(_gifPaused ? "アニメ: 一時停止" : "アニメ: 再生");
+            UpdateAnimStatusInfo();  // 情報パネルの一時停止表示を追従（v0.8.8）
         }
 
         /// <summary>
@@ -2382,6 +2549,7 @@ namespace ClipViewer
             if (_gifTargetImage != null)
                 _gifTargetImage.Source = frames[_gifFrameIndex];
             UpdateAnimFrameInfo(_gifFrameIndex + 1, frames.Length);
+            UpdateAnimStatusInfo();  // コマ送りで自動一時停止した場合の表示追従（v0.8.8）
 
             // ステップ後に再生再開した場合の目標時刻をリセット
             _gifNextFrameTick = Stopwatch.GetTimestamp() + MsToTicks(delays[_gifFrameIndex]);
@@ -2395,7 +2563,8 @@ namespace ClipViewer
         {
             if (_clipFiles.Count == 0) return;
 
-            // loop名アニメの再生中はページ送りをループ末尾まで保留する（v0.8.5）。
+            // _loop識別子アニメの再生中はページ送りを即時実行せず、
+            // 現在のループを末尾まで再生してから遷移する（v0.8.5新設・v0.8.8仕様）。
             // 2回目のページ送りで即時遷移（保留のキャンセル）。一時停止中は即時。
             if (_gifForceLoop && _gifCurrentIdx >= 0 && !_gifPaused && !_gifAdvancePending)
             {
@@ -2826,7 +2995,6 @@ namespace ClipViewer
 
             if (currentPos < 0) return;
 
-            var extensions = new[] { "*.clip", "*.psd", "*.jpg", "*.jpeg", "*.png", "*.webp", "*.gif", "*.avif" };
             int pos = currentPos;
 
             while (true)
@@ -2847,25 +3015,15 @@ namespace ClipViewer
                 try
                 {
                     var files = new List<string>();
-                    foreach (string ext in extensions)
-                        files.AddRange(Directory.GetFiles(siblings[pos], ext));
+                    foreach (string ext in _viewerExtPatterns)
+                        files.AddRange(Directory.GetFiles(LongPath.Fix(siblings[pos]), ext));
 
                     if (files.Count > 0)
                     {
                         files.Sort(NaturalSort.Comparer);
-                        _clipFiles = files;
-                        lock (_cacheLock)
-                        {
-                            _brokenFiles.Clear();
-                            _imageCache.Clear();
-                            _wideCache.Clear();
-                            _srcSizeCache.Clear();
-                            _gifFrameCache.Clear();
-                            _gifDelayCache.Clear();
-                            _gifAvailCache.Clear();
-                            _knownAnimated.Clear();
-                            _knownStatic.Clear();
-                        }
+                        _clipFiles        = files;
+                        _currentDirectory = siblings[pos];
+                        ClearImageCaches();
                         ClearNavHistory();
                         _currentIndex = 0;
                         ResetZoom();
@@ -2890,7 +3048,7 @@ namespace ClipViewer
             try
             {
                 foreach (string ae in _archiveExts)
-                    archives.AddRange(Directory.GetFiles(parentDir, "*" + ae));
+                    archives.AddRange(Directory.GetFiles(LongPath.Fix(parentDir), "*" + ae));
             }
             catch { return; }
 
@@ -2978,7 +3136,7 @@ namespace ClipViewer
                 string src  = _clipFiles[targetIdx];
                 EnsureExtracted(src);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
                 string dest = Path.Combine(_settings.SaveDirectory, Path.GetFileName(src));
-                File.Copy(src, dest, overwrite: true);
+                File.Copy(LongPath.Fix(src), dest, overwrite: true);
                 ShowNotification($"{Path.GetFileName(src)} を保存しました", 1.0);
             }
             catch
@@ -3014,7 +3172,7 @@ namespace ClipViewer
             try
             {
                 EnsureExtracted(sourcePath);  // 遅延展開ZIPのエントリなら実体化（v0.8.4）
-                File.Copy(sourcePath, dlg.FileName, overwrite: true);
+                File.Copy(LongPath.Fix(sourcePath), dlg.FileName, overwrite: true);
             }
             catch
             {
@@ -3057,18 +3215,7 @@ namespace ClipViewer
             // プリフェッチ停止 → インデックスずれを防ぐためキャッシュ全クリア
             _prefetchCts?.Cancel();
             _clipFiles.RemoveAt(targetIdx);
-            lock (_cacheLock)
-            {
-                _imageCache.Clear();
-                _wideCache.Clear();
-                _srcSizeCache.Clear();
-                _brokenFiles.Clear();
-                _gifFrameCache.Clear();
-                _gifDelayCache.Clear();
-                _gifAvailCache.Clear();
-                _knownAnimated.Clear();
-                _knownStatic.Clear();
-            }
+            ClearImageCaches();
 
             ShowNotification($"{fileName} を削除しました", 1.0);
 
@@ -3257,7 +3404,33 @@ namespace ClipViewer
             _prefetchCts?.Cancel();
             SaveArchivePosition();  // アーカイブ閲覧中なら表示位置を記録（F52）
             CleanupTempDir();
+            // 非アクティブのまま閉じられた場合（タスクバーから閉じる等）でも、
+            // 起動中に外部編集された ini を取り込んでから保存する（上書き消失防止）
+            TryReloadIniConfig(notify: false);
             PersistStateNow();
+        }
+
+        // =========================================================
+        // ini 外部変更の自動再読み込み（F54, v0.8.6）
+        // F2でエディタ編集→保存→ウィンドウに戻った時点（Activated）で自動反映する。
+        // [State] セクションはアプリが所有するため取り込まず、実行中の状態を維持する。
+        // =========================================================
+
+        private void Window_Activated(object sender, EventArgs e)
+        {
+            TryReloadIniConfig(notify: true);
+        }
+
+        private void TryReloadIniConfig(bool notify)
+        {
+            if (!IniFileManager.HasExternalChange()) return;
+            AppSettings fresh = IniFileManager.TryParseForReload();
+            if (fresh == null) return;  // 読取失敗（書き込み途中等）は現状維持。次のアクティブ化で再試行
+
+            _settings = fresh;
+            SyncStateToSettings();  // [State] は実行中の値で上書き（外部編集の反映対象は設定セクションのみ）
+            ApplyFilterToggle();    // フィルタ設定が変わっていれば背景で再生成（署名不変なら no-op）
+            if (notify) ShowNotification("iniの変更を読み込みました", 1.5);
         }
 
         /// <summary>現在の動作状態を _settings の [State] へ反映する。</summary>
@@ -3323,9 +3496,11 @@ namespace ClipViewer
 
         private void Window_MouseMove(object sender, MouseEventArgs e)
         {
-            // シークバーの出現/退場（下端48pxゾーン、F51）
+            // シークバーの出現/退場（クライアント領域下端50pxゾーン、F51 / v0.8.8改善）
+            // Window.ActualHeight はウィンドウモードだとタイトルバー等の非クライアント領域を
+            // 含むため判定線が見た目より下にずれる。クライアント領域（RootGrid）基準で判定する
             if (!_isDragging && !_seekDragging)
-                SetSeekBarVisible(e.GetPosition(this).Y >= ActualHeight - 48);
+                SetSeekBarVisible(e.GetPosition(RootGrid).Y >= RootGrid.ActualHeight - 50);
 
             if (!_isDragging) return;
 
@@ -3403,8 +3578,8 @@ namespace ClipViewer
             SeekFill.HorizontalAlignment = rtl ? HorizontalAlignment.Right : HorizontalAlignment.Left;
             SeekFill.Width = Math.Max(0, Math.Min(w, rtl ? w - thumbX : thumbX));
 
-            // サム（直径14px、中心を thumbX に合わせてクランプ）
-            SeekThumbPos.X = Math.Max(0, Math.Min(w - 14, thumbX - 7));
+            // サム（直径16px、中心を thumbX に合わせてクランプ）
+            SeekThumbPos.X = Math.Max(0, Math.Min(w - 16, thumbX - 8));
 
             if (showLabel)
             {
@@ -3491,6 +3666,7 @@ namespace ClipViewer
                 ["NavigateDirUp"]     = () => NavigateSiblingDirectory(next: false),
                 ["NavigateDirDown"]   = () => NavigateSiblingDirectory(next: true),
                 ["OpenIniFile"]       = OpenIniFile,
+                ["ReloadCache"]       = ReloadCache,
                 ["ToggleWindowMode"]  = ToggleWindowMode,
                 ["ToggleMoireFilter"] = ToggleMoireFilter,
                 ["ToggleSharpen"]     = ToggleSharpen,
@@ -3564,7 +3740,14 @@ namespace ClipViewer
             else if (s.ToggleMoireFilter.Contains(k))    ToggleMoireFilter();
             else if (s.ToggleSharpen.Contains(k))        ToggleSharpen();
             else if (s.ToggleArchiveHistory.Contains(k)) ToggleArchiveHistory();
+            else if (s.ReloadCache.Contains(k))          ReloadCache();
             else if (s.Exit.Contains(k))                 Application.Current.Shutdown();
+
+            // F10 は Windows が「メニュー起動キー」として扱うため、放置すると押下後に
+            // メニューモードへ入ってビープ・以降のキー入力無視が起きる（メニューを持たない本アプリでは
+            // 実害だけが残る）。F10 割り当てを機能させるため常に消費する（v0.8.10）。
+            // Alt+F4 等のシステム操作を潰さないよう、Key.System 全般ではなく F10 に限定する
+            if (k == Key.F10) e.Handled = true;
         }
     }
 }

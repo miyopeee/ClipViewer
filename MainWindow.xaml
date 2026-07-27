@@ -1,7 +1,7 @@
 <Window x:Class="ClipViewer.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="ClipViewer v0.8.5"
+        Title="ClipViewer v0.8.11"
         WindowStyle="None"
         WindowState="Maximized"
         Background="Black"
@@ -16,7 +16,9 @@
         MouseUp="Window_MouseUp"
         MouseWheel="Window_MouseWheel"
         MouseLeave="Window_MouseLeave">
-    <Grid>
+    <!-- RootGrid = クライアント領域基準。シークバー出現判定はウィンドウ枠込みの
+         Window.ActualHeight ではなくこちらの高さで行う（v0.8.8） -->
+    <Grid x:Name="RootGrid">
 
         <!-- ズーム・ドラッグ用コンテナ（Transform をここに適用） -->
         <Grid x:Name="ZoomContainer">
@@ -104,8 +106,22 @@
                                FontSize="13"
                                FontFamily="Segoe UI"
                                TextWrapping="Wrap" />
-                    <!-- アニメ再生フレーム番号（再生中のみ表示、v0.8.5） -->
+                    <!-- アニメ再生フレーム番号（アニメ表示中のみ、v0.8.5） -->
                     <TextBlock x:Name="InfoAnimFrame"
+                               Foreground="White"
+                               FontSize="13"
+                               FontFamily="Segoe UI"
+                               TextWrapping="Wrap"
+                               Visibility="Collapsed" />
+                    <!-- アニメ再生モード（アニメ表示中は必ず表示、v0.8.8）-->
+                    <TextBlock x:Name="InfoAnimMode"
+                               Foreground="White"
+                               FontSize="13"
+                               FontFamily="Segoe UI"
+                               TextWrapping="Wrap"
+                               Visibility="Collapsed" />
+                    <!-- 一時停止表示（一時停止中のみ、v0.8.8）-->
+                    <TextBlock x:Name="InfoAnimPause"
                                Foreground="White"
                                FontSize="13"
                                FontFamily="Segoe UI"
@@ -158,10 +174,11 @@
         </StackPanel>
 
         <!-- シークバー（画面下端ホバーで表示、F51）
-             読了部分=オレンジ塗り / 未読部分=1px輪郭のみ。右綴じ時は右起点で埋まる -->
+             読了部分=ビビッドイエロー（15%透過）/ 未読部分=レッド（不透明度15%）+黒1px縁取り。
+             右綴じ時は右起点で埋まる（v0.8.7で配色変更、v0.8.10で未読部分に下地を追加） -->
         <Grid x:Name="SeekBarPanel"
               VerticalAlignment="Bottom"
-              Height="48"
+              Height="50"
               Background="Transparent"
               Opacity="0"
               IsHitTestVisible="False"
@@ -177,39 +194,54 @@
             <!-- ドラッグ中のページ番号（サムの真上に追従） -->
             <TextBlock x:Name="SeekPageLabel"
                        Grid.Column="1"
-                       Foreground="#FF9500"
+                       Foreground="#FFE600"
                        FontSize="12"
                        FontFamily="Segoe UI"
                        HorizontalAlignment="Left"
                        VerticalAlignment="Top"
                        Margin="0,6,0,0"
                        Visibility="Collapsed">
+                <!-- 黄文字は明るい画像上で溶けるため黒シャドウで縁取り相当を付ける（v0.8.7） -->
+                <TextBlock.Effect>
+                    <DropShadowEffect ShadowDepth="0" BlurRadius="3" Color="Black" Opacity="1" />
+                </TextBlock.Effect>
                 <TextBlock.RenderTransform>
                     <TranslateTransform x:Name="SeekLabelPos" />
                 </TextBlock.RenderTransform>
             </TextBlock>
 
-            <!-- トラック（バー8px・中央80%幅） -->
+            <!-- トラック（バー8px・中央80%幅）
+                 v0.8.7: バー=ビビッドイエロー #FFE600 の15%透過(α=D9)+黒1px縁取り（縁は不透過）。
+                 サム16px+黒1px縁・塗りは非透過100%イエロー（透けると体裁が悪いため）
+                 v0.8.10: 未読部分の下地に少しオレンジ寄りのレッド #FF3300 を不透明度15%（α=26）で追加
+                 （黒背景では輪郭線だけだとバーが消えて見えなくなるため。あくまで
+                 「うっすら色が乗る」濃度で、下の画像はほぼ透けたままにする）。
+                 z順は 未読下地→読了塗り→輪郭→サム（黒縁と読了塗りを潰さない順） -->
             <Grid x:Name="SeekTrack"
                   Grid.Column="1"
-                  Height="14"
+                  Height="20"
                   VerticalAlignment="Bottom"
                   Margin="0,0,0,10"
                   SizeChanged="SeekTrack_SizeChanged">
-                <Rectangle x:Name="SeekOutline"
+                <Rectangle x:Name="SeekUnread"
                            Height="8" VerticalAlignment="Center"
-                           Stroke="#FF9500" StrokeThickness="1"
-                           Fill="Transparent"
+                           Fill="#26FF3300"
                            RadiusX="4" RadiusY="4" />
                 <Rectangle x:Name="SeekFill"
                            Height="8" VerticalAlignment="Center"
                            HorizontalAlignment="Right"
-                           Fill="#FF9500"
+                           Fill="#D9FFE600"
                            RadiusX="4" RadiusY="4"
                            Width="0" />
+                <Rectangle x:Name="SeekOutline"
+                           Height="8" VerticalAlignment="Center"
+                           Stroke="#FF000000" StrokeThickness="1"
+                           Fill="Transparent"
+                           RadiusX="4" RadiusY="4" />
                 <Ellipse x:Name="SeekThumb"
-                         Width="14" Height="14"
-                         Fill="#FF9500"
+                         Width="16" Height="16"
+                         Fill="#FFFFE600"
+                         Stroke="#FF000000" StrokeThickness="1"
                          HorizontalAlignment="Left" VerticalAlignment="Center">
                     <Ellipse.RenderTransform>
                         <TranslateTransform x:Name="SeekThumbPos" />

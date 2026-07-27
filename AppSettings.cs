@@ -38,11 +38,13 @@ namespace ClipViewer
         public Key[] NavigateDirUp     { get; set; } = new[] { Key.Up };
         public Key[] NavigateDirDown   { get; set; } = new[] { Key.Down };
         public Key[] OpenIniFile       { get; set; } = new[] { Key.F2 };
+        // キャッシュ＋ファイルリストの再読み込み（v0.8.9, F55）
+        public Key[] ReloadCache       { get; set; } = new[] { Key.R };
         // ウィンドウモード切替（Return = Enter キー）
         public Key[] ToggleWindowMode  { get; set; } = new[] { Key.Return };
-        // フィルタトグル（F10/F12 はフィルタ種切り替え等の将来用に予約）
+        // フィルタトグル（v0.8.10: シャープ化を F11→F10 に変更。F11/F12 は将来用の空き）
         public Key[] ToggleMoireFilter { get; set; } = new[] { Key.F9 };
-        public Key[] ToggleSharpen     { get; set; } = new[] { Key.F11 };
+        public Key[] ToggleSharpen     { get; set; } = new[] { Key.F10 };
         // アーカイブ履歴機能 ON/OFF（デフォルト未割り当て = Key.None。実キーは ini で指定）
         public Key[] ToggleArchiveHistory { get; set; } = new[] { Key.None };
         // アニメーション制御
