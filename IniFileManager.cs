@@ -267,7 +267,7 @@ namespace ClipViewer
             var lines = new List<string>
             {
                 "; ========================================",
-                "; ClipViewer v0.8.11 設定ファイル",
+                "; ClipViewer v0.8.12 設定ファイル",
                 "; ========================================",
                 "; 対応フォーマット：.clip / .psd / .jpg / .jpeg / .png / .webp / .gif / .avif",
                 "; アーカイブ：.zip / .cbz（直接対応）/ .rar / .lzh / .7z（7-Zip 要インストール）",

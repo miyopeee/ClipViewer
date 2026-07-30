@@ -2826,6 +2826,7 @@ namespace ClipViewer
             ZoomScale.CenterY = 0;
             ZoomTranslate.X   = newTransX;
             ZoomTranslate.Y   = newTransY;
+            ClampPan();  // ズームアウトで画面外に取り残されないよう可動域へ引き戻す（v0.8.12）
             // 情報パネル表示中なら拡大率を即時反映
             if (_infoMode != InfoDisplayMode.Off)
                 InfoZoom.Text = BuildZoomText(GetInfoTargetIndex());
@@ -3393,6 +3394,7 @@ namespace ClipViewer
             // 表示領域変化 → フィルタ済みキャッシュのサイズが合わなくなるため再フィルタ（デバウンス付き）
             UpdateViewportSize();
             ScheduleFilterRefresh();
+            ClampPan();  // ウィンドウ/フルスクリーン切替で画像が画面外に残らないように（v0.8.12）
         }
 
         // =========================================================
@@ -3507,6 +3509,46 @@ namespace ClipViewer
             Point current   = e.GetPosition(this);
             ZoomTranslate.X = _dragStartX + (current.X - _dragStart.X);
             ZoomTranslate.Y = _dragStartY + (current.Y - _dragStart.Y);
+            ClampPan();
+        }
+
+        /// <summary>
+        /// パン位置（ZoomTranslate）を、画像が画面外へ飛んでいかない範囲に丸める（v0.8.12）。
+        ///   画像が画面より大きい（ズームイン中）: 画像の端が画面の内側に入らない範囲まで＝余白を作らない
+        ///   画像が画面より小さい（Fit 付近）    : 画像が画面からはみ出さない範囲まで
+        /// 判定は「変換後のバウンディングボックス」で行うため、回転・反転・見開きにも自動で追従する。
+        /// </summary>
+        private void ClampPan()
+        {
+            FrameworkElement content = (SingleImage.Visibility == Visibility.Visible)
+                ? (FrameworkElement)SingleImage
+                : SpreadGrid;
+            if (content == null || content.ActualWidth <= 0 || content.ActualHeight <= 0) return;
+
+            double vw = RootGrid.ActualWidth, vh = RootGrid.ActualHeight;
+            if (vw <= 0 || vh <= 0) return;
+
+            Rect r;
+            try
+            {
+                r = content.TransformToVisual(RootGrid)
+                           .TransformBounds(new Rect(0, 0, content.ActualWidth, content.ActualHeight));
+            }
+            catch { return; }  // レイアウト未確定などで変換できない場合は触らない
+
+            // r は現在の ZoomTranslate を含むため、平行移動ゼロの基準位置に戻してから可動域を求める
+            double bx = r.X - ZoomTranslate.X;
+            double by = r.Y - ZoomTranslate.Y;
+
+            ZoomTranslate.X = ClampToRange(ZoomTranslate.X, -bx, vw - bx - r.Width);
+            ZoomTranslate.Y = ClampToRange(ZoomTranslate.Y, -by, vh - by - r.Height);
+        }
+
+        /// <summary>端点 a / b の大小関係に依らず、その区間へ v を丸める。</summary>
+        private static double ClampToRange(double v, double a, double b)
+        {
+            double lo = Math.Min(a, b), hi = Math.Max(a, b);
+            return (v < lo) ? lo : (v > hi) ? hi : v;
         }
 
         private void Window_MouseLeave(object sender, MouseEventArgs e)
